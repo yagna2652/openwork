@@ -18,7 +18,7 @@ export type PaletteItem = {
   action: () => void;
 };
 
-type PaletteMode = "root" | "sessions";
+type PaletteMode = "root" | "sessions" | "documents";
 
 export type SessionOption = {
   workspaceId: string;
@@ -39,6 +39,10 @@ export type CommandPaletteProps = {
   onCreateNewSession: () => void;
   /** Called when "Open settings" is chosen. Accepts an optional route to jump straight to a tab. */
   onOpenSettings: (route?: string) => void;
+  /** Optional: searches Markdown files in the active workspace. */
+  onSearchDocuments?: (query: string) => Promise<string[]>;
+  /** Optional: opens a Markdown document in the active workspace shell. */
+  onOpenDocument?: (path: string) => void;
   /** Optional — open a URL in the user's browser. Falls back to window.open. */
   onOpenUrl?: (url: string) => void;
   /** Optional: sessions for the second mode. */
@@ -54,6 +58,7 @@ export type CommandPaletteProps = {
 export function CommandPalette(props: CommandPaletteProps) {
   const [mode, setMode] = useState<PaletteMode>("root");
   const [query, setQuery] = useState("");
+  const [documentPaths, setDocumentPaths] = useState<string[]>([]);
   const [activeIndex, setActiveIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const optionRefs = useRef<Array<HTMLButtonElement | null>>([]);
@@ -100,6 +105,18 @@ export function CommandPalette(props: CommandPaletteProps) {
         meta: t("session.cmd_sessions_meta"),
         action: () => {
           setMode("sessions");
+          setQuery("");
+          setActiveIndex(0);
+          window.setTimeout(() => inputRef.current?.focus(), 0);
+        },
+      },
+      {
+        id: "documents",
+        title: "Open Markdown document",
+        detail: "Search Markdown files in the active workspace",
+        meta: "Files",
+        action: () => {
+          setMode("documents");
           setQuery("");
           setActiveIndex(0);
           window.setTimeout(() => inputRef.current?.focus(), 0);
@@ -188,12 +205,40 @@ export function CommandPalette(props: CommandPaletteProps) {
         },
       },
     ];
+    if (!props.onSearchDocuments || !props.onOpenDocument) {
+      const documentsIndex = items.findIndex((item) => item.id === "documents");
+      if (documentsIndex !== -1) items.splice(documentsIndex, 1);
+    }
     const q = query.trim().toLowerCase();
     if (!q) return items;
     return items.filter((item) =>
       `${item.title} ${item.detail ?? ""}`.toLowerCase().includes(q),
     );
   }, [props, query]);
+
+  useEffect(() => {
+    if (mode !== "documents" || !props.onSearchDocuments) {
+      setDocumentPaths([]);
+      return;
+    }
+
+    let cancelled = false;
+    const id = window.setTimeout(() => {
+      void props.onSearchDocuments?.(query).then(
+        (paths) => {
+          if (!cancelled) setDocumentPaths(paths);
+        },
+        () => {
+          if (!cancelled) setDocumentPaths([]);
+        },
+      );
+    }, 120);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(id);
+    };
+  }, [mode, props, query]);
 
   const sessionItems = useMemo<PaletteItem[]>(() => {
     const q = query.trim().toLowerCase();
@@ -214,7 +259,21 @@ export function CommandPalette(props: CommandPaletteProps) {
     }));
   }, [props, query]);
 
-  const items = mode === "sessions" ? sessionItems : rootItems;
+  const documentItems = useMemo<PaletteItem[]>(() => {
+    if (!props.onOpenDocument) return [];
+    return documentPaths.slice(0, 80).map((path) => ({
+      id: `document:${path}`,
+      title: path.split("/").filter(Boolean).at(-1) || path,
+      detail: path,
+      meta: "Markdown",
+      action: () => {
+        props.onClose();
+        props.onOpenDocument?.(path);
+      },
+    }));
+  }, [documentPaths, props]);
+
+  const items = mode === "sessions" ? sessionItems : mode === "documents" ? documentItems : rootItems;
 
   useEffect(() => {
     if (activeIndex >= items.length) setActiveIndex(0);
@@ -269,11 +328,15 @@ export function CommandPalette(props: CommandPaletteProps) {
   const placeholder =
     mode === "sessions"
       ? t("session.palette_placeholder_sessions")
+      : mode === "documents"
+        ? "Search Markdown files"
       : t("session.palette_placeholder_actions");
 
   const title =
     mode === "sessions"
       ? t("session.palette_title_sessions")
+      : mode === "documents"
+        ? "Markdown documents"
       : t("session.palette_title_actions");
 
   return (

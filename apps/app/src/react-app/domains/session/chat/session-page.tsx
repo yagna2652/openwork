@@ -34,6 +34,7 @@ import { OwDotTicker } from "../../../shell/dot-ticker";
 import { useReactRenderWatchdog } from "../../../shell/react-render-watchdog";
 import { isElectronRuntime } from "../../../../app/utils";
 import { BrowserPanel } from "../browser/browser-panel";
+import { DocumentPage } from "../../document/document-page";
 
 type StatusBarOverrides = Pick<
   StatusBarProps,
@@ -124,6 +125,7 @@ export type SessionPageProps = {
   questionReplyBusy?: boolean;
   respondQuestion?: (requestID: string, answers: string[][]) => void;
   statusBar?: Partial<StatusBarOverrides>;
+  document?: { path: string; onAskOpenWork: (prompt: string) => void | Promise<void> } | null;
   notFoundMessage?: string | null;
   onRenameSession?: (sessionId: string, title: string) => Promise<void> | void;
   onDeleteSession?: (sessionId: string) => Promise<void> | void;
@@ -166,6 +168,7 @@ export function SessionPage(props: SessionPageProps) {
     clientConnected: props.clientConnected,
     startupPhase: props.startupPhase,
     hasSurface: Boolean(props.surface),
+    hasDocument: Boolean(props.document),
     workspaceCount: props.workspaces.length,
   });
 
@@ -198,6 +201,8 @@ export function SessionPage(props: SessionPageProps) {
     props.startupPhase !== "ready";
   const showSessionLoadingState =
     Boolean(props.selectedSessionId) && props.sessionLoadingById(props.selectedSessionId) && !showWorkspaceSetupEmptyState;
+  const showDocumentOnly = Boolean(props.document?.path && !props.selectedSessionId);
+  const showDocumentRail = Boolean(props.document?.path && props.selectedSessionId);
   const todos = useMemo(() => props.todos.filter((todo) => todo.content.trim()), [props.todos]);
   const completedTodos = useMemo(
     () => todos.filter((todo) => todo.status === "completed").length,
@@ -326,6 +331,8 @@ export function SessionPage(props: SessionPageProps) {
               <h1 className="truncate text-[15px] font-semibold text-dls-text">
                 {showWorkspaceSetupEmptyState
                   ? t("session.create_or_connect_workspace")
+                  : showDocumentOnly
+                    ? props.document?.path
                   : selectedSessionTitle || t("session.default_title")}
               </h1>
               <span className="hidden truncate text-[13px] text-dls-secondary lg:inline">
@@ -439,7 +446,22 @@ export function SessionPage(props: SessionPageProps) {
                 </div>
               ) : null}
 
-              {!showDelayedSessionLoadingState && canRenderReactSurface ? (
+              {!showDelayedSessionLoadingState && showDocumentOnly && props.document?.path ? (
+                props.openworkServerClient ? (
+                  <DocumentPage
+                    client={props.openworkServerClient}
+                    workspaceId={props.selectedWorkspaceId}
+                    path={props.document.path}
+                    onAskOpenWork={props.document.onAskOpenWork}
+                  />
+                ) : (
+                  <div className="flex h-full items-center justify-center px-6 text-center text-sm text-dls-secondary">
+                    OpenWork server is not connected. Reconnect before opening this document.
+                  </div>
+                )
+              ) : null}
+
+              {!showDelayedSessionLoadingState && !showDocumentOnly && canRenderReactSurface ? (
                 <SessionSurface
                   client={props.openworkServerClient!}
                   workspaceId={props.runtimeWorkspaceId!}
@@ -450,7 +472,7 @@ export function SessionPage(props: SessionPageProps) {
                 />
               ) : null}
 
-              {!showDelayedSessionLoadingState && !canRenderReactSurface && !showStartupSkeleton ? (
+              {!showDelayedSessionLoadingState && !showDocumentOnly && !canRenderReactSurface && !showStartupSkeleton ? (
                 <div className={`mx-auto max-w-[800px] px-6 ${showWorkspaceSetupEmptyState ? "pt-20" : "pt-10"}`}>
                   {props.notFoundMessage ? (
                     <div className="px-6 py-16 text-center">
@@ -484,6 +506,22 @@ export function SessionPage(props: SessionPageProps) {
                 </div>
               ) : null}
             </div>
+            {!showDelayedSessionLoadingState && showDocumentRail && props.document?.path ? (
+              <aside className="hidden min-h-0 w-[42%] min-w-[360px] max-w-[720px] shrink-0 border-l border-dls-border bg-dls-surface xl:block">
+                {props.openworkServerClient ? (
+                  <DocumentPage
+                    client={props.openworkServerClient}
+                    workspaceId={props.selectedWorkspaceId}
+                    path={props.document.path}
+                    onAskOpenWork={props.document.onAskOpenWork}
+                  />
+                ) : (
+                  <div className="flex h-full items-center justify-center px-6 text-center text-sm text-dls-secondary">
+                    OpenWork server is not connected. Reconnect before opening this document.
+                  </div>
+                )}
+              </aside>
+            ) : null}
           </div>
 
           {todos.length > 0 ? (

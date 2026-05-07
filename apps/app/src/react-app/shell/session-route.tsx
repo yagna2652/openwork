@@ -1,6 +1,6 @@
 /** @jsxImportSource react */
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useLocation, useNavigate, useParams } from "react-router-dom";
 import type {
   AgentPartInput,
   ConfigProvidersResponse,
@@ -108,7 +108,7 @@ import { useReloadCoordinator } from "./reload-coordinator";
 import { getReactQueryClient } from "../infra/query-client";
 import { useStatusToasts } from "../domains/shell-feedback/status-toasts";
 import { useSessionControlActions } from "../domains/session/control/session-control-actions";
-import { legacySessionRoute, workspaceSessionRoute, workspaceSettingsRoute } from "./workspace-routes";
+import { legacySessionRoute, workspaceDocumentRoute, workspaceSessionRoute, workspaceSettingsRoute } from "./workspace-routes";
 
 type RouteWorkspace = OpenworkWorkspaceInfo & {
   displayNameResolved: string;
@@ -343,14 +343,19 @@ async function draftToParts(draft: ComposerDraft, workspaceRoot: string) {
 
 export function SessionRoute() {
   const navigate = useNavigate();
+  const location = useLocation();
   const platform = usePlatform();
   const local = useLocal();
   const reloadCoordinator = useReloadCoordinator();
   const { showToast } = useStatusToasts();
   const checkDesktopRestriction = useCheckDesktopRestriction();
   const restrictionNotice = useRestrictionNotice();
-  const params = useParams<{ workspaceId?: string; sessionId?: string }>();
+  const params = useParams<{ workspaceId?: string; sessionId?: string; "*"?: string }>();
   const routeWorkspaceId = params.workspaceId?.trim() || "";
+  const documentPathFromQuery = useMemo(() => {
+    return new URLSearchParams(location.search).get("document")?.trim() || null;
+  }, [location.search]);
+  const documentPath = params["*"]?.trim() || documentPathFromQuery;
   const selectedSessionId = params.sessionId?.trim() || null;
   const navigateToWorkspaceSession = useCallback((workspaceId: string, sessionId?: string | null, options?: { replace?: boolean }) => {
     const id = workspaceId.trim();
@@ -1677,7 +1682,7 @@ export function SessionRoute() {
     [refreshRouteState],
   );
 
-  const handleCreateTaskInWorkspace = useCallback(async (workspaceId: string) => {
+  const handleCreateTaskInWorkspace = useCallback(async (workspaceId: string, initialPrompt?: string, sourceDocumentPath?: string) => {
     const workspace = workspaces.find((item) => item.id === workspaceId);
     if (
       !workspace ||
@@ -1699,6 +1704,29 @@ export function SessionRoute() {
       const session = unwrap(
         await workspaceClient.session.create({ directory: workspace.path?.trim() || undefined }),
       );
+      const promptText = initialPrompt?.trim();
+      if (promptText) {
+        const envRuntimeKey = buildOpenworkEnvRuntimeKey({
+          baseUrl: client?.baseUrl ?? null,
+          pid: openworkServerHostInfoState?.pid ?? null,
+          port: openworkServerHostInfoState?.port ?? null,
+        });
+        const envSystemContext = await buildOpenworkEnvSystemContext(client, {
+          cacheKey: session.id,
+          runtimeKey: envRuntimeKey,
+        });
+        const result = await workspaceClient.session.promptAsync({
+          sessionID: session.id,
+          parts: [{ type: "text", text: promptText }],
+          model: local.prefs.defaultModel ?? undefined,
+          agent: selectedAgent ?? undefined,
+          ...(local.prefs.modelVariant ? { variant: local.prefs.modelVariant } : {}),
+          ...(envSystemContext ? { system: envSystemContext } : {}),
+        });
+        if (result.error) {
+          throw new Error(serializeSDKError(result.error));
+        }
+      }
       setLegacySelectedWorkspaceId(workspaceId);
       writeActiveWorkspaceId(workspaceId || null);
       writeLastSessionFor(workspaceId, session.id);
@@ -1706,7 +1734,12 @@ export function SessionRoute() {
         ...current,
         [workspaceId]: [session as any, ...(current[workspaceId] ?? [])],
       }));
-      navigateToWorkspaceSession(workspaceId, session.id);
+      const sourcePath = sourceDocumentPath?.trim();
+      if (sourcePath) {
+        navigate(`${workspaceSessionRoute(workspaceId, session.id)}?document=${encodeURIComponent(sourcePath)}`);
+      } else {
+        navigateToWorkspaceSession(workspaceId, session.id);
+      }
       void refreshRouteState();
     } catch (error) {
       const message = describeRouteError(error);
@@ -1721,8 +1754,11 @@ export function SessionRoute() {
           }, 1_000);
         }
       }
+      if (initialPrompt?.trim()) {
+        throw error;
+      }
     }
-  }, [baseUrl, errorsByWorkspaceId, loading, navigateToWorkspaceSession, refreshRouteState, retryingWorkspaceIds, token, workspaces]);
+  }, [baseUrl, client, errorsByWorkspaceId, loading, local.prefs.defaultModel, local.prefs.modelVariant, navigate, navigateToWorkspaceSession, openworkServerHostInfoState?.pid, openworkServerHostInfoState?.port, refreshRouteState, retryingWorkspaceIds, selectedAgent, token, workspaces]);
 
   // Global shortcuts:
   //   Cmd/Ctrl+N  -> new task in selected workspace
@@ -2053,6 +2089,16 @@ export function SessionRoute() {
         onOpenCreateWorkspace: handleOpenCreateWorkspace,
       }}
       surface={surfaceProps}
+      document={
+        documentPath
+          ? {
+              path: documentPath,
+              onAskOpenWork: async (prompt) => {
+                await handleCreateTaskInWorkspace(selectedWorkspaceId, prompt, documentPath);
+              },
+            }
+          : null
+      }
       history={{
         canUndo: false,
         canRedo: false,
@@ -2178,6 +2224,21 @@ export function SessionRoute() {
         }
       }}
       onOpenSession={(workspaceId, sessionId) => navigateToWorkspaceSession(workspaceId, sessionId)}
+      onSearchDocuments={selectedWorkspaceId && selectedWorkspaceRoot && opencodeClient ? async (query) => {
+        const trimmed = query.trim();
+        const result = unwrap(
+          await opencodeClient.find.files({
+            query: trimmed || ".md",
+            dirs: "false",
+            limit: 80,
+            directory: selectedWorkspaceRoot,
+          }),
+        );
+        return result.filter((path) => /\.(md|mdx|markdown)$/i.test(path));
+      } : undefined}
+      onOpenDocument={selectedWorkspaceId ? (path) => {
+        navigate(workspaceDocumentRoute(selectedWorkspaceId, path));
+      } : undefined}
       onOpenSettings={(route) => handleOpenSettings(route ?? "/settings/general")}
       sessions={paletteSessionOptions}
     />

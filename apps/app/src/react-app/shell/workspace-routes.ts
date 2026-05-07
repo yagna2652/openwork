@@ -8,6 +8,16 @@ export function workspaceSessionRoute(workspaceId: string, sessionId?: string | 
     : `/workspace/${workspace}/session`;
 }
 
+export function workspaceDocumentRoute(workspaceId: string, path: string) {
+  const workspace = encodeURIComponent(workspaceId.trim());
+  const normalizedPath = path
+    .split("/")
+    .filter(Boolean)
+    .map((part) => encodeURIComponent(part))
+    .join("/");
+  return `/workspace/${workspace}/document/${normalizedPath}`;
+}
+
 export function workspaceSettingsRoute(
   workspaceId: string,
   tab: SettingsTab | "extensions/mcp" | "extensions/plugins" | string = "general",
