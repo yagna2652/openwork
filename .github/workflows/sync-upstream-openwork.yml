@@ -17,7 +17,6 @@ on:
 permissions:
   contents: write
   pull-requests: write
-  issues: write
 
 concurrency:
   group: sync-upstream-openwork-${{ github.event.inputs.base_branch || 'pulp/document-runtime' }}
@@ -97,7 +96,6 @@ jobs:
       - name: Report upstream sync conflict
         if: steps.fetch.outputs.upstream_count != '0' && steps.merge.outputs.merge_conflict == 'true'
         env:
-          GH_TOKEN: ${{ github.token }}
           BASE_BRANCH: ${{ steps.inputs.outputs.base_branch }}
           UPSTREAM_BRANCH: ${{ steps.inputs.outputs.upstream_branch }}
           UPSTREAM_COUNT: ${{ steps.fetch.outputs.upstream_count }}
@@ -122,16 +120,7 @@ jobs:
             echo "3. Run focused document checks before pushing the sync branch."
           } > "$issue_body"
 
-          existing_issue="$(gh issue list --state open --search "Upstream OpenWork sync conflict in:title" --json number --jq '.[0].number // empty')"
-          if [ -n "$existing_issue" ]; then
-            gh issue edit "$existing_issue" --body-file "$issue_body"
-            gh issue view "$existing_issue" --json url --jq .url
-          else
-            gh issue create \
-              --title "Upstream OpenWork sync conflict" \
-              --body-file "$issue_body"
-          fi
-
+          cat "$issue_body" >> "$GITHUB_STEP_SUMMARY"
           exit 1
 
       - name: Analyze document runtime impact
