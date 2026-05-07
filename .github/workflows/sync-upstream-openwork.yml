@@ -17,6 +17,7 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  issues: write
 
 concurrency:
   group: sync-upstream-openwork-${{ github.event.inputs.base_branch || 'pulp/document-runtime' }}
@@ -75,15 +76,66 @@ jobs:
         id: merge
         shell: bash
         run: |
-          set -euo pipefail
+          set -uo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout -B "${{ steps.inputs.outputs.sync_branch }}" "origin/${{ steps.inputs.outputs.base_branch }}"
-          git merge --no-edit "upstream/${{ steps.inputs.outputs.upstream_branch }}"
+          if git merge --no-edit "upstream/${{ steps.inputs.outputs.upstream_branch }}"; then
+            echo "merge_conflict=false" >> "$GITHUB_OUTPUT"
+          else
+            conflict_files="$(git diff --name-only --diff-filter=U)"
+            {
+              echo "merge_conflict=true"
+              echo "conflict_files<<EOF"
+              printf '%s\n' "$conflict_files"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+            git merge --abort
+          fi
           echo "merge_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
+      - name: Report upstream sync conflict
+        if: steps.fetch.outputs.upstream_count != '0' && steps.merge.outputs.merge_conflict == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_BRANCH: ${{ steps.inputs.outputs.base_branch }}
+          UPSTREAM_BRANCH: ${{ steps.inputs.outputs.upstream_branch }}
+          UPSTREAM_COUNT: ${{ steps.fetch.outputs.upstream_count }}
+          CONFLICT_FILES: ${{ steps.merge.outputs.conflict_files }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          issue_body="$RUNNER_TEMP/sync-conflict-body.md"
+          {
+            echo "Automated sync from \`different-ai/openwork:$UPSTREAM_BRANCH\` into \`$BASE_BRANCH\` hit merge conflicts."
+            echo ""
+            echo "Upstream commits waiting: \`$UPSTREAM_COUNT\`"
+            echo ""
+            echo "Conflict files:"
+            echo ""
+            printf '%s\n' "$CONFLICT_FILES" | sed 's/^/- `/' | sed 's/$/`/'
+            echo ""
+            echo "Resolution workflow:"
+            echo ""
+            echo "1. Ask Codex to resolve the upstream sync conflict on \`$BASE_BRANCH\`."
+            echo "2. Pay special attention to document runtime files: route handling, selected-text task creation, right-side document rail, and workspace file APIs."
+            echo "3. Run focused document checks before pushing the sync branch."
+          } > "$issue_body"
+
+          existing_issue="$(gh issue list --state open --search "Upstream OpenWork sync conflict in:title" --json number --jq '.[0].number // empty')"
+          if [ -n "$existing_issue" ]; then
+            gh issue edit "$existing_issue" --body-file "$issue_body"
+            gh issue view "$existing_issue" --json url --jq .url
+          else
+            gh issue create \
+              --title "Upstream OpenWork sync conflict" \
+              --body-file "$issue_body"
+          fi
+
+          exit 1
+
       - name: Analyze document runtime impact
-        if: steps.fetch.outputs.upstream_count != '0'
+        if: steps.fetch.outputs.upstream_count != '0' && steps.merge.outputs.merge_conflict != 'true'
         id: impact
         shell: bash
         run: |
@@ -109,23 +161,23 @@ jobs:
           fi
 
       - name: Install dependencies
-        if: steps.fetch.outputs.upstream_count != '0'
+        if: steps.fetch.outputs.upstream_count != '0' && steps.merge.outputs.merge_conflict != 'true'
         run: pnpm install --frozen-lockfile
 
       - name: Run focused document checks
-        if: steps.fetch.outputs.upstream_count != '0'
+        if: steps.fetch.outputs.upstream_count != '0' && steps.merge.outputs.merge_conflict != 'true'
         run: bun test apps/app/scripts/document/document-task-prompt.test.ts
 
       - name: Run whitespace check
-        if: steps.fetch.outputs.upstream_count != '0'
+        if: steps.fetch.outputs.upstream_count != '0' && steps.merge.outputs.merge_conflict != 'true'
         run: git diff --check "origin/${{ steps.inputs.outputs.base_branch }}"..HEAD
 
       - name: Push sync branch
-        if: steps.fetch.outputs.upstream_count != '0'
+        if: steps.fetch.outputs.upstream_count != '0' && steps.merge.outputs.merge_conflict != 'true'
         run: git push --force-with-lease origin "${{ steps.inputs.outputs.sync_branch }}"
 
       - name: Create or update sync PR
-        if: steps.fetch.outputs.upstream_count != '0'
+        if: steps.fetch.outputs.upstream_count != '0' && steps.merge.outputs.merge_conflict != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           BASE_BRANCH: ${{ steps.inputs.outputs.base_branch }}
