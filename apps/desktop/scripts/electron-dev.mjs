@@ -193,6 +193,10 @@ process.once("SIGTERM", () => void stopAll(143));
 
 runSync(nodeCmd, [resolve(__dirname, "prepare-sidecar.mjs"), "--force", "--outdir", electronSidecarDir], { cwd: desktopRoot });
 
+// Build the server TS → JS so Electron can import it in-process
+console.log("[electron-dev] Building openwork-server (tsc)...");
+runSync(pnpmCmd, ["--filter", "openwork-server", "build"], { cwd: repoRoot });
+
 const initialProbeUrls = [startUrl, ...viteProbeUrls].filter(Boolean);
 let viteReady = false;
 for (const candidate of initialProbeUrls) {
@@ -214,7 +218,6 @@ if (!viteReady) {
 if (!viteReady) {
   uiChild = run(pnpmCmd, ["-w", "dev:ui"], {
     cwd: repoRoot,
-    detached: process.platform !== "win32",
     env: {
       ...process.env,
       PORT: String(devPort),
@@ -235,7 +238,6 @@ const cdpPort = cdpPortRaw === "" || cdpPortRaw === "0" ? "" : cdpPortRaw;
 
 electronChild = run(pnpmCmd, ["exec", "electron", "./electron/main.mjs"], {
   cwd: desktopRoot,
-  detached: process.platform !== "win32",
   env: {
     ...process.env,
     OPENWORK_DEV_MODE: process.env.OPENWORK_DEV_MODE ?? "1",
