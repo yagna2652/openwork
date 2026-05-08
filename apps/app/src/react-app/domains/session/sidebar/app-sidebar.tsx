@@ -3,6 +3,7 @@ import * as React from "react";
 import {
   AlertCircle,
   ChevronRight,
+  FileText,
   Loader2,
   MoreHorizontal,
   Pencil,
@@ -326,13 +327,17 @@ export type AppSidebarProps = {
   selectedWorkspaceId: string;
   developerMode: boolean;
   selectedSessionId: string | null;
+  selectedDocumentPath?: string | null;
   showSessionActions?: boolean;
   sessionStatusById?: Record<string, string>;
   connectingWorkspaceId: string | null;
   workspaceConnectionStateById: Record<string, WorkspaceConnectionState>;
+  documentsByWorkspaceId?: Record<string, string[]>;
+  documentsLoadingByWorkspaceId?: Record<string, boolean>;
   newTaskDisabled: boolean;
   onSelectWorkspace: (workspaceId: string) => Promise<boolean> | boolean | void;
   onOpenSession: (workspaceId: string, sessionId: string) => void;
+  onOpenDocument?: (workspaceId: string, path: string) => void;
   onPrefetchSession?: (workspaceId: string, sessionId: string) => void;
   onCreateTaskInWorkspace: (workspaceId: string) => void;
   onOpenRenameSession?: (sessionId: string) => void;
@@ -454,14 +459,18 @@ export function AppSidebar(props: AppSidebarProps) {
   const contextValue: SidebarContextValue = {
     selectedWorkspaceId: props.selectedWorkspaceId,
     selectedSessionId: props.selectedSessionId,
+    selectedDocumentPath: props.selectedDocumentPath,
     developerMode: props.developerMode,
     showSessionActions: props.showSessionActions,
     sessionStatusById: props.sessionStatusById,
     newTaskDisabled: props.newTaskDisabled,
     connectingWorkspaceId: props.connectingWorkspaceId,
     workspaceConnectionStateById: props.workspaceConnectionStateById,
+    documentsByWorkspaceId: props.documentsByWorkspaceId,
+    documentsLoadingByWorkspaceId: props.documentsLoadingByWorkspaceId,
     onSelectWorkspace: props.onSelectWorkspace,
     onOpenSession: props.onOpenSession,
+    onOpenDocument: props.onOpenDocument,
     onPrefetchSession: props.onPrefetchSession,
     onCreateTaskInWorkspace: props.onCreateTaskInWorkspace,
     onOpenRenameSession: props.onOpenRenameSession,
@@ -639,6 +648,9 @@ function WorkspaceSidebarGroup({
   })();
 
   const rootSessions = getRootSessions(group.sessions);
+  const documents = ctx.documentsByWorkspaceId?.[workspace.id] ?? [];
+  const documentsLoading = Boolean(ctx.documentsLoadingByWorkspaceId?.[workspace.id]);
+  const documentPreview = documents.slice(0, 8);
   const sessionRows = flattenSessionRows(
     group.sessions,
     previewCount,
@@ -715,7 +727,33 @@ function WorkspaceSidebarGroup({
                       ctx.onEditWorkspaceConnection(workspace.id);
                     }}
                   />
-                ) : showInitialLoading ? (
+                ) : (
+                  <>
+                    {ctx.onOpenDocument && (documentsLoading || documentPreview.length > 0) ? (
+                      <>
+                        <SidebarMenuSubItem>
+                          <SidebarMenuSubButton aria-disabled className="text-muted-foreground text-[11px] font-semibold uppercase tracking-wide">
+                            Documents
+                          </SidebarMenuSubButton>
+                        </SidebarMenuSubItem>
+                        {documentsLoading && documentPreview.length === 0 ? (
+                          <SidebarMenuSubItem>
+                            <SidebarMenuSubButton aria-disabled className="text-muted-foreground text-xs">
+                              <Loader2 size={12} className="animate-spin" />
+                              Loading documents
+                            </SidebarMenuSubButton>
+                          </SidebarMenuSubItem>
+                        ) : null}
+                        {documentPreview.map((path) => (
+                          <DocumentMenuItem
+                            key={path}
+                            path={path}
+                            workspaceId={workspace.id}
+                          />
+                        ))}
+                      </>
+                    ) : null}
+                    {showInitialLoading ? (
                   <>
                     {[0, 1, 2].map((idx) => (
                       <SidebarMenuSubItem key={`skeleton-${idx}`}>
@@ -771,6 +809,8 @@ function WorkspaceSidebarGroup({
                       <span className="truncate">{t("workspace.no_tasks")}</span>
                     </SidebarMenuSubButton>
                   </SidebarMenuSubItem>
+                    )}
+                  </>
                 )}
               </SidebarMenuSub>
             </CollapsibleContent>
@@ -778,6 +818,29 @@ function WorkspaceSidebarGroup({
         </SidebarMenu>
       </SidebarGroupContent>
     </SidebarGroup>
+  );
+}
+
+type DocumentMenuItemProps = {
+  path: string;
+  workspaceId: string;
+};
+
+function DocumentMenuItem({ path, workspaceId }: DocumentMenuItemProps) {
+  const ctx = useSidebarContext();
+  const label = path.split("/").filter(Boolean).at(-1) || path;
+  const isSelected = ctx.selectedWorkspaceId === workspaceId && ctx.selectedDocumentPath === path;
+
+  return (
+    <SidebarMenuSubItem>
+      <SidebarMenuSubButton
+        isActive={isSelected}
+        onClick={() => ctx.onOpenDocument?.(workspaceId, path)}
+      >
+        <FileText size={13} className="shrink-0 text-muted-foreground" />
+        <span className="truncate" title={path}>{label}</span>
+      </SidebarMenuSubButton>
+    </SidebarMenuSubItem>
   );
 }
 

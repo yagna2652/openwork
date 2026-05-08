@@ -5,14 +5,18 @@ import type { WorkspaceConnectionState } from "../../../../app/types";
 export type SidebarContextValue = {
   selectedWorkspaceId: string;
   selectedSessionId: string | null;
+  selectedDocumentPath?: string | null;
   developerMode: boolean;
   showSessionActions?: boolean;
   sessionStatusById?: Record<string, string>;
   newTaskDisabled: boolean;
   connectingWorkspaceId: string | null;
   workspaceConnectionStateById: Record<string, WorkspaceConnectionState>;
+  documentsByWorkspaceId?: Record<string, string[]>;
+  documentsLoadingByWorkspaceId?: Record<string, boolean>;
   onSelectWorkspace: (workspaceId: string) => Promise<boolean> | boolean | void;
   onOpenSession: (workspaceId: string, sessionId: string) => void;
+  onOpenDocument?: (workspaceId: string, path: string) => void;
   onPrefetchSession?: (workspaceId: string, sessionId: string) => void;
   onCreateTaskInWorkspace: (workspaceId: string) => void;
   onOpenRenameSession?: (sessionId: string) => void;

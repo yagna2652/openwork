@@ -63,15 +63,19 @@ export type SessionPageSidebarProps = {
   workspaceSessionGroups: WorkspaceSessionGroup[];
   selectedWorkspaceId: string;
   selectedSessionId: string | null;
+  selectedDocumentPath?: string | null;
   developerMode: boolean;
   sessionStatusById: Record<string, string>;
   connectingWorkspaceId: string | null;
   workspaceConnectionStateById: Record<string, WorkspaceConnectionState>;
+  documentsByWorkspaceId?: Record<string, string[]>;
+  documentsLoadingByWorkspaceId?: Record<string, boolean>;
   newTaskDisabled: boolean;
   sidebarHydratedFromCache: boolean;
   startupPhase: BootPhase;
   onSelectWorkspace: (workspaceId: string) => Promise<boolean> | boolean | void;
   onOpenSession: (workspaceId: string, sessionId: string) => void;
+  onOpenDocument?: (workspaceId: string, path: string) => void;
   onPrefetchSession?: (workspaceId: string, sessionId: string) => void;
   onCreateTaskInWorkspace: (workspaceId: string) => void;
   onOpenRenameWorkspace: (workspaceId: string) => void;
@@ -233,8 +237,7 @@ export function SessionPage(props: SessionPageProps) {
     props.startupPhase !== "ready";
   const showSessionLoadingState =
     Boolean(props.selectedSessionId) && props.sessionLoadingById(props.selectedSessionId) && !showWorkspaceSetupEmptyState;
-  const showDocumentOnly = Boolean(props.document?.path && !props.selectedSessionId);
-  const showDocumentRail = Boolean(props.document?.path && props.selectedSessionId);
+  const hasDocument = Boolean(props.document?.path);
   const todos = useMemo(() => props.todos.filter((todo) => todo.content.trim()), [props.todos]);
   const completedTodos = useMemo(
     () => todos.filter((todo) => todo.status === "completed").length,
@@ -349,14 +352,18 @@ export function SessionPage(props: SessionPageProps) {
           selectedWorkspaceId={props.sidebar.selectedWorkspaceId}
           developerMode={props.sidebar.developerMode}
           selectedSessionId={props.sidebar.selectedSessionId}
+          selectedDocumentPath={props.sidebar.selectedDocumentPath}
           showInitialLoading={sidebarInitialLoading}
           showSessionActions={Boolean(props.onRenameSession || props.onDeleteSession)}
           sessionStatusById={props.sidebar.sessionStatusById}
           connectingWorkspaceId={props.sidebar.connectingWorkspaceId}
           workspaceConnectionStateById={props.sidebar.workspaceConnectionStateById}
+          documentsByWorkspaceId={props.sidebar.documentsByWorkspaceId}
+          documentsLoadingByWorkspaceId={props.sidebar.documentsLoadingByWorkspaceId}
           newTaskDisabled={props.sidebar.newTaskDisabled}
           onSelectWorkspace={props.sidebar.onSelectWorkspace}
           onOpenSession={props.sidebar.onOpenSession}
+          onOpenDocument={props.sidebar.onOpenDocument}
           onPrefetchSession={props.sidebar.onPrefetchSession}
           onCreateTaskInWorkspace={props.sidebar.onCreateTaskInWorkspace}
           onOpenRenameSession={props.onRenameSession ? openRenameModal : undefined}
@@ -382,7 +389,7 @@ export function SessionPage(props: SessionPageProps) {
               <h1 className="truncate text-[15px] font-semibold text-dls-text">
                 {showWorkspaceSetupEmptyState
                   ? t("session.create_or_connect_workspace")
-                  : showDocumentOnly
+                  : hasDocument
                     ? props.document?.path
                   : selectedSessionTitle || t("session.default_title")}
               </h1>
@@ -497,7 +504,7 @@ export function SessionPage(props: SessionPageProps) {
                 </div>
               ) : null}
 
-              {!showDelayedSessionLoadingState && showDocumentOnly && props.document?.path ? (
+              {!showDelayedSessionLoadingState && hasDocument && props.document?.path ? (
                 props.openworkServerClient ? (
                   <DocumentPage
                     client={props.openworkServerClient}
@@ -512,7 +519,7 @@ export function SessionPage(props: SessionPageProps) {
                 )
               ) : null}
 
-              {!showDelayedSessionLoadingState && !showDocumentOnly && canRenderReactSurface ? (
+              {!showDelayedSessionLoadingState && !hasDocument && canRenderReactSurface ? (
                 <SessionSurface
                   // Spread `surface` first so the explicit per-workspace
                   // routing props below CAN'T be silently overridden by
@@ -529,7 +536,7 @@ export function SessionPage(props: SessionPageProps) {
                 />
               ) : null}
 
-              {!showDelayedSessionLoadingState && !showDocumentOnly && !canRenderReactSurface && !showStartupSkeleton ? (
+              {!showDelayedSessionLoadingState && !hasDocument && !canRenderReactSurface && !showStartupSkeleton ? (
                 <div className={`mx-auto max-w-[800px] px-6 ${showWorkspaceSetupEmptyState ? "pt-20" : "pt-10"}`}>
                   {props.notFoundMessage ? (
                     <div className="px-6 py-16 text-center">
@@ -597,18 +604,30 @@ export function SessionPage(props: SessionPageProps) {
                 </div>
               ) : null}
             </div>
-            {!showDelayedSessionLoadingState && showDocumentRail && props.document?.path ? (
-              <aside className="hidden min-h-0 w-[42%] min-w-[360px] max-w-[720px] shrink-0 border-l border-dls-border bg-dls-surface xl:block">
-                {props.openworkServerClient ? (
-                  <DocumentPage
-                    client={props.openworkServerClient}
-                    workspaceId={props.selectedWorkspaceId}
-                    path={props.document.path}
-                    onAskOpenWork={props.document.onAskOpenWork}
+            {!showDelayedSessionLoadingState && hasDocument ? (
+              <aside className="hidden min-h-0 w-[34%] min-w-[360px] max-w-[560px] shrink-0 border-l border-dls-border bg-dls-surface xl:block">
+                {canRenderReactSurface ? (
+                  <SessionSurface
+                    client={props.openworkServerClient!}
+                    workspaceId={props.runtimeWorkspaceId!}
+                    sessionId={props.selectedSessionId!}
+                    opencodeBaseUrl={reactSessionBaseUrl}
+                    openworkToken={reactSessionToken}
+                    {...props.surface!}
                   />
                 ) : (
-                  <div className="flex h-full items-center justify-center px-6 text-center text-sm text-dls-secondary">
-                    OpenWork server is not connected. Reconnect before opening this document.
+                  <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center">
+                    <div className="text-sm font-medium text-dls-text">OpenWork</div>
+                    <p className="max-w-xs text-sm leading-6 text-dls-secondary">
+                      Select text in the document and ask OpenWork, or start a task for this workspace.
+                    </p>
+                    <Button
+                      className="h-8 px-3 py-1.5 text-[13px]"
+                      onClick={() => props.sidebar.onCreateTaskInWorkspace(props.selectedWorkspaceId)}
+                      disabled={props.sidebar.newTaskDisabled}
+                    >
+                      Start task
+                    </Button>
                   </div>
                 )}
               </aside>

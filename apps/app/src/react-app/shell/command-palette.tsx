@@ -261,7 +261,23 @@ export function CommandPalette(props: CommandPaletteProps) {
 
   const documentItems = useMemo<PaletteItem[]>(() => {
     if (!props.onOpenDocument) return [];
-    return documentPaths.slice(0, 80).map((path) => ({
+    const paths = documentPaths.slice(0, 80);
+    if (paths.length === 0) {
+      const trimmed = query.trim();
+      if (/\.(md|mdx|markdown)$/i.test(trimmed)) {
+        return [{
+          id: `document:${trimmed}`,
+          title: trimmed.split("/").filter(Boolean).at(-1) || trimmed,
+          detail: trimmed,
+          meta: "Open path",
+          action: () => {
+            props.onClose();
+            props.onOpenDocument?.(trimmed);
+          },
+        }];
+      }
+    }
+    return paths.map((path) => ({
       id: `document:${path}`,
       title: path.split("/").filter(Boolean).at(-1) || path,
       detail: path,
@@ -271,7 +287,7 @@ export function CommandPalette(props: CommandPaletteProps) {
         props.onOpenDocument?.(path);
       },
     }));
-  }, [documentPaths, props]);
+  }, [documentPaths, props, query]);
 
   const items = mode === "sessions" ? sessionItems : mode === "documents" ? documentItems : rootItems;
 

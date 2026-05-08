@@ -167,6 +167,34 @@ export type OpenworkWorkspaceFileContent = {
   updatedAt: number;
 };
 
+export type OpenworkWorkspaceFileSession = {
+  canWrite: boolean;
+  createdAt: number;
+  expiresAt: number;
+  id: string;
+  ttlMs: number;
+  workspaceId: string;
+};
+
+export type OpenworkWorkspaceFileCatalogEntry = {
+  kind: "dir" | "file";
+  mtimeMs: number;
+  path: string;
+  revision: string;
+  size: number;
+};
+
+export type OpenworkWorkspaceFileCatalogSnapshot = {
+  cursor: number;
+  generatedAt: number;
+  items: OpenworkWorkspaceFileCatalogEntry[];
+  nextAfter?: string;
+  sessionId: string;
+  total: number;
+  truncated: boolean;
+  workspaceId: string;
+};
+
 export type OpenworkWorkspaceFileWriteResult = {
   ok: boolean;
   path: string;
@@ -705,6 +733,19 @@ async function requestJson<T>(
   return json as T;
 }
 
+function unwrapSuccessData<T>(value: T | { ok?: boolean; data?: T }): T {
+  if (
+    value &&
+    typeof value === "object" &&
+    "data" in value &&
+    "ok" in value &&
+    (value as { ok?: boolean }).ok === true
+  ) {
+    return (value as { data: T }).data;
+  }
+  return value as T;
+}
+
 async function requestMultipartRaw(
   baseUrl: string,
   path: string,
@@ -1201,18 +1242,62 @@ export function createOpenworkServerClient(options: { baseUrl: string; token?: s
         { token, hostToken, timeoutMs: timeouts.binary },
       ),
 
-    readWorkspaceFile: (workspaceId: string, path: string) =>
-      requestJson<OpenworkWorkspaceFileContent>(
+    createWorkspaceFileSession: async (
+      workspaceId: string,
+      payload: { ttlSeconds?: number; write?: boolean } = {},
+    ) =>
+      unwrapSuccessData(await requestJson<OpenworkWorkspaceFileSession>(
+        baseUrl,
+        `/workspace/${encodeURIComponent(workspaceId)}/file-sessions`,
+        {
+          token,
+          hostToken,
+          method: "POST",
+          body: payload,
+        },
+      )),
+
+    listWorkspaceFileCatalog: async (
+      workspaceId: string,
+      fileSessionId: string,
+      options?: { after?: string | null; includeDirs?: boolean; limit?: number; prefix?: string | null },
+    ) => {
+      const query = new URLSearchParams();
+      if (options?.after) query.set("after", options.after);
+      if (options?.includeDirs === false) query.set("includeDirs", "false");
+      if (typeof options?.limit === "number") query.set("limit", String(options.limit));
+      if (options?.prefix?.trim()) query.set("prefix", options.prefix.trim());
+      const suffix = query.size ? `?${query.toString()}` : "";
+      return unwrapSuccessData(await requestJson<OpenworkWorkspaceFileCatalogSnapshot>(
+        baseUrl,
+        `/workspace/${encodeURIComponent(workspaceId)}/file-sessions/${encodeURIComponent(fileSessionId)}/catalog/snapshot${suffix}`,
+        { token, hostToken },
+      ));
+    },
+
+    closeWorkspaceFileSession: async (workspaceId: string, fileSessionId: string) =>
+      unwrapSuccessData(await requestJson<{ activeWorkspaceId: string }>(
+        baseUrl,
+        `/workspace/${encodeURIComponent(workspaceId)}/file-sessions/${encodeURIComponent(fileSessionId)}`,
+        {
+          token,
+          hostToken,
+          method: "DELETE",
+        },
+      )),
+
+    readWorkspaceFile: async (workspaceId: string, path: string) =>
+      unwrapSuccessData(await requestJson<OpenworkWorkspaceFileContent>(
         baseUrl,
         `/workspace/${encodeURIComponent(workspaceId)}/files/content?path=${encodeURIComponent(path)}`,
         { token, hostToken },
-      ),
+      )),
 
     writeWorkspaceFile: (
       workspaceId: string,
       payload: { path: string; content: string; baseUpdatedAt?: number | null; force?: boolean },
     ) =>
-      requestJson<OpenworkWorkspaceFileWriteResult>(
+      requestJson<OpenworkWorkspaceFileWriteResult | { ok: boolean; data: OpenworkWorkspaceFileWriteResult }>(
         baseUrl,
         `/workspace/${encodeURIComponent(workspaceId)}/files/content`,
         {
@@ -1221,7 +1306,7 @@ export function createOpenworkServerClient(options: { baseUrl: string; token?: s
           method: "POST",
           body: payload,
         },
-      ),
+      ).then(unwrapSuccessData),
 
     listArtifacts: (workspaceId: string) =>
       requestJson<OpenworkArtifactList>(baseUrl, `/workspace/${encodeURIComponent(workspaceId)}/artifacts`, {
