@@ -86,8 +86,9 @@ if (process.platform === "darwin" && APP_ICON_IMAGE && !APP_ICON_IMAGE.isEmpty()
   app.dock.setIcon(APP_ICON_IMAGE);
 }
 
-// Optional: expose Chrome DevTools Protocol so external tools (chrome-devtools
-// MCP, raw CDP clients, etc.) can attach to this Electron instance.
+// Optional: expose Chrome DevTools Protocol so external tools (raw CDP clients,
+// DevTools front-ends) can attach to this Electron instance for debugging.
+// NOT required for the built-in browser — that uses native webContents APIs.
 // Enable by setting OPENWORK_ELECTRON_REMOTE_DEBUG_PORT=<port> before launch.
 const remoteDebugPort = Number.parseInt(
   process.env.OPENWORK_ELECTRON_REMOTE_DEBUG_PORT?.trim() ?? "",
@@ -192,6 +193,12 @@ let browserView = null;
 let browserViewVisible = false;
 const BROWSER_DEFAULT_URL = "https://www.google.com";
 
+/** Send an IPC message to the main renderer, guarding against disposed frames. */
+function sendToRenderer(channel, payload) {
+  if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) return;
+  try { mainWindow.webContents.send(channel, payload); } catch { /* window closing */ }
+}
+
 function createBrowserView() {
   if (browserView) return browserView;
   browserView = new WebContentsView({
@@ -202,6 +209,9 @@ function createBrowserView() {
       partition: "persist:openwork-browser",
     },
   });
+  // Load about:blank immediately to preempt persistent-session restore.
+  // Cookies live on the session object, not the document — they survive this.
+  browserView.webContents.loadURL("about:blank");
   browserView.webContents.setWindowOpenHandler(({ url }) => {
     void shell.openExternal(url);
     return { action: "deny" };
@@ -215,21 +225,23 @@ function createBrowserView() {
 }
 
 function sendBrowserState() {
-  if (!mainWindow || !browserView) return;
-  try {
-    mainWindow.webContents.send("openwork:browser:state", {
-      url: browserView.webContents.getURL(),
-      title: browserView.webContents.getTitle(),
-      canGoBack: browserView.webContents.canGoBack(),
-      canGoForward: browserView.webContents.canGoForward(),
-      isLoading: browserView.webContents.isLoading(),
-    });
-  } catch {
-    // window may be closing
-  }
+  if (!browserView) return;
+  sendToRenderer("openwork:browser:state", {
+    url: browserView.webContents.getURL(),
+    title: browserView.webContents.getTitle(),
+    canGoBack: browserView.webContents.canGoBack(),
+    canGoForward: browserView.webContents.canGoForward(),
+    isLoading: browserView.webContents.isLoading(),
+  });
 }
 
-function showBrowserView(bounds) {
+/**
+ * Attach the browser view to the main window.
+ * @param {object} bounds — { x, y, width, height }
+ * @param {object} [opts]
+ * @param {boolean} [opts.preloadDefault=true] — load default URL if the view has no URL
+ */
+function attachBrowserView(bounds, { preloadDefault = true } = {}) {
   if (!mainWindow) return;
   const view = createBrowserView();
   if (!mainWindow.contentView.children.includes(view)) {
@@ -239,7 +251,8 @@ function showBrowserView(bounds) {
     view.setBounds(bounds);
   }
   browserViewVisible = true;
-  if (!view.webContents.getURL()) {
+  const url = view.webContents.getURL();
+  if (preloadDefault && (!url || url === "about:blank")) {
     view.webContents.loadURL(BROWSER_DEFAULT_URL);
   }
   sendBrowserState();
@@ -255,9 +268,12 @@ function hideBrowserView() {
   browserViewVisible = false;
 }
 
+let _snapshotReset = null; // set by ensureBrowserMcpServers
+
 function destroyBrowserView() {
   hideBrowserView();
   if (browserView) {
+    _snapshotReset?.();
     try { browserView.webContents.close(); } catch { /* already destroyed */ }
     browserView = null;
   }
@@ -273,53 +289,27 @@ let browserMcpPorts = null; // { builtinPort, externalPort, stop }
 async function ensureBrowserMcpServers() {
   if (browserMcpPorts) return browserMcpPorts;
 
-  // CDP port for the Electron app itself (WebContentsView is a target on it)
-  const cdpPortRaw = process.env.OPENWORK_ELECTRON_REMOTE_DEBUG_PORT?.trim() ?? "";
-  const cdpPort = Number.parseInt(cdpPortRaw, 10);
-  if (!Number.isFinite(cdpPort) || cdpPort <= 0) {
-    console.error("[browser-mcp] Cannot start — no Electron CDP port configured (OPENWORK_ELECTRON_REMOTE_DEBUG_PORT)");
-    return null;
-  }
-
   try {
     browserMcpPorts = await startBrowserMcpServers({
-      electronCdpPort: cdpPort,
+      getWebContents: () => browserView?.webContents ?? null,
       onBuiltinToolCall: async (toolName) => {
-        // Every built-in browser tool call ensures the panel is open and
-        // has a loaded page before puppeteer tries to connect.
+        // Ensure the browser panel is open so the agent can interact.
+        // preloadDefault: false — the tool will navigate on its own.
         if (!mainWindow) return;
-        const view = createBrowserView();
         if (!browserViewVisible) {
-          // Add the WebContentsView but don't position it yet — pass zero
-          // bounds so it stays invisible.  The React <BrowserPanel>
-          // component will compute its own layout bounds and call
-          // browser.show(bounds) / browser.setBounds(bounds) once the
-          // <aside> has been laid out.  Positioning eagerly here causes
-          // the view to overlay on top of the session content before React
-          // has made room for the panel column.
-          showBrowserView({ x: 0, y: 0, width: 0, height: 0 });
+          attachBrowserView({ x: 0, y: 0, width: 0, height: 0 }, { preloadDefault: false });
         }
-        // Always notify the renderer so it can render the BrowserPanel
-        // toolbar.  The React component may have unmounted (session switch)
-        // while the WebContentsView stayed open, so we re-send every time.
-        mainWindow.webContents.send("openwork:browser:panel-opened");
-        // Wait for the page to have a real URL (not about:blank)
-        const url = view.webContents.getURL();
-        if (!url || url === "about:blank") {
-          view.webContents.loadURL(BROWSER_DEFAULT_URL);
-          await new Promise((resolve) => {
-            view.webContents.once("did-finish-load", resolve);
-            setTimeout(resolve, 5000);
-          });
-        }
+        sendToRenderer("openwork:browser:panel-opened");
       },
       onHideBrowser: () => {
         hideBrowserView();
-        if (mainWindow) {
-          mainWindow.webContents.send("openwork:browser:panel-closed");
-        }
+        sendToRenderer("openwork:browser:panel-closed");
       },
     });
+    // Wire snapshot reset so destroyBrowserView clears stale uid state
+    if (browserMcpPorts._snapshotReset) {
+      _snapshotReset = browserMcpPorts._snapshotReset;
+    }
     console.log(`[browser-mcp] Built-in browser MCP at http://127.0.0.1:${browserMcpPorts.builtinPort}/mcp`);
     console.log(`[browser-mcp] External Chrome MCP at http://127.0.0.1:${browserMcpPorts.externalPort}/mcp`);
   } catch (err) {
@@ -492,10 +482,72 @@ async function isDirectory(targetPath) {
 async function readJsonFile(targetPath, fallback) {
   try {
     const raw = await readFile(targetPath, "utf8");
-    return JSON.parse(raw);
+    try {
+      return JSON.parse(raw);
+    } catch (error) {
+      const recovered = parseFirstJsonObject(raw);
+      if (recovered.ok) {
+        console.warn(`[json] recovered ${targetPath} from trailing invalid data`, error);
+        await writeJsonFileAtomic(targetPath, recovered.value);
+        return recovered.value;
+      }
+      throw error;
+    }
   } catch {
     return fallback;
   }
+}
+
+function parseFirstJsonObject(raw) {
+  let inString = false;
+  let escaped = false;
+  let depth = 0;
+  let start = -1;
+
+  for (let index = 0; index < raw.length; index += 1) {
+    const char = raw[index];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === '"') {
+      inString = true;
+      continue;
+    }
+    if (char === "{") {
+      if (depth === 0) start = index;
+      depth += 1;
+      continue;
+    }
+    if (char === "}") {
+      depth -= 1;
+      if (depth === 0 && start >= 0) {
+        try {
+          return { ok: true, value: JSON.parse(raw.slice(start, index + 1)) };
+        } catch {
+          return { ok: false, value: null };
+        }
+      }
+    }
+  }
+
+  return { ok: false, value: null };
+}
+
+async function writeJsonFileAtomic(outputPath, value) {
+  const content = `${JSON.stringify(value, null, 2)}\n`;
+  JSON.parse(content);
+  await mkdir(path.dirname(outputPath), { recursive: true });
+  const tempPath = `${outputPath}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
+  await writeFile(tempPath, content, "utf8");
+  await rename(tempPath, outputPath);
 }
 
 function normalizeDesktopBootstrapConfig(input) {
@@ -628,11 +680,52 @@ function remoteWorkspaceId(baseUrl, directory) {
   return stableWorkspaceId(key);
 }
 
+function parseOpenworkWorkspaceIdFromUrl(input) {
+  const raw = String(input ?? "").trim();
+  if (!raw) return null;
+  try {
+    const url = new URL(raw);
+    const segments = url.pathname.split("/").filter(Boolean);
+    const workspaceIndex = segments.indexOf("workspace");
+    const legacyIndex = segments.indexOf("w");
+    const mountIndex = workspaceIndex >= 0 ? workspaceIndex : legacyIndex;
+    return mountIndex >= 0 && segments[mountIndex + 1]
+      ? decodeURIComponent(segments[mountIndex + 1])
+      : null;
+  } catch {
+    const match = raw.match(/\/(?:workspace|w)\/([^/?#]+)/);
+    if (!match?.[1]) return null;
+    try {
+      return decodeURIComponent(match[1]);
+    } catch {
+      return match[1];
+    }
+  }
+}
+
+function stripOpenworkWorkspaceMount(input) {
+  const raw = String(input ?? "").trim();
+  if (!raw) return null;
+  try {
+    const url = new URL(raw);
+    const segments = url.pathname.split("/").filter(Boolean);
+    const workspaceIndex = segments.indexOf("workspace");
+    const legacyIndex = segments.indexOf("w");
+    const mountIndex = workspaceIndex >= 0 ? workspaceIndex : legacyIndex;
+    if (mountIndex >= 0 && segments[mountIndex + 1]) {
+      const prefix = segments.slice(0, mountIndex).join("/");
+      url.pathname = prefix ? `/${prefix}` : "/";
+    }
+    return url.toString().replace(/\/+$/, "");
+  } catch {
+    return raw.replace(/\/(?:workspace|w)\/[^/?#]+.*$/, "").replace(/\/+$/, "") || raw;
+  }
+}
+
 function openworkRemoteWorkspaceId(hostUrl, workspaceId) {
-  const key = String(workspaceId ?? "").trim()
-    ? `openwork::${hostUrl}::${String(workspaceId).trim()}`
-    : `openwork::${hostUrl}`;
-  return stableWorkspaceId(key);
+  const remoteWorkspaceId = String(workspaceId ?? "").trim() || parseOpenworkWorkspaceIdFromUrl(hostUrl);
+  if (remoteWorkspaceId) return `rem_${remoteWorkspaceId}`;
+  return `rem_${createHash("sha256").update(`openwork::${hostUrl}`).digest("hex").slice(0, 12)}`;
 }
 
 async function readWorkspaceOpenworkConfig(workspacePath) {
@@ -653,24 +746,66 @@ async function writeWorkspaceOpenworkConfig(workspacePath, config) {
 
 async function readWorkspaceState() {
   const state = await readJsonFile(workspaceStatePath(), EMPTY_WORKSPACE_LIST);
-  return {
+  const selectedId =
+    typeof state?.selectedId === "string"
+      ? state.selectedId
+      : typeof state?.selectedWorkspaceId === "string"
+        ? state.selectedWorkspaceId
+        : typeof state?.activeId === "string"
+          ? state.activeId
+          : "";
+  const watchedId =
+    typeof state?.watchedId === "string"
+      ? state.watchedId
+      : typeof state?.watchedWorkspaceId === "string"
+        ? state.watchedWorkspaceId
+        : null;
+  const activeId = typeof state?.activeId === "string" ? state.activeId : null;
+  const workspaces = Array.isArray(state?.workspaces) ? state.workspaces : [];
+  let changed = false;
+  const idMap = new Map();
+  const migratedWorkspaces = workspaces.map((entry) => {
+    const workspace = entry && typeof entry === "object" ? entry : normalizeWorkspaceEntry(entry ?? {});
+    if (workspace.workspaceType !== "remote" || workspace.remoteType !== "openwork") return workspace;
+
+    const remoteWorkspaceId = String(workspace.openworkWorkspaceId ?? "").trim()
+      || parseOpenworkWorkspaceIdFromUrl(workspace.openworkHostUrl)
+      || parseOpenworkWorkspaceIdFromUrl(workspace.baseUrl);
+    if (!remoteWorkspaceId) return workspace;
+
+    const hostUrl = stripOpenworkWorkspaceMount(workspace.openworkHostUrl) || stripOpenworkWorkspaceMount(workspace.baseUrl);
+    const nextId = openworkRemoteWorkspaceId(hostUrl ?? workspace.baseUrl, remoteWorkspaceId);
+    idMap.set(workspace.id, nextId);
+    const nextWorkspace = {
+      ...workspace,
+      id: nextId,
+      baseUrl: hostUrl,
+      openworkWorkspaceId: remoteWorkspaceId,
+      openworkHostUrl: hostUrl,
+    };
+    if (workspace.id !== nextWorkspace.id || workspace.baseUrl !== nextWorkspace.baseUrl || workspace.openworkWorkspaceId !== nextWorkspace.openworkWorkspaceId || workspace.openworkHostUrl !== nextWorkspace.openworkHostUrl) {
+      changed = true;
+    }
+    return nextWorkspace;
+  });
+
+  const migratedSelectedId = idMap.get(selectedId) ?? selectedId;
+  const migratedWatchedId = watchedId ? idMap.get(watchedId) ?? watchedId : null;
+  const migratedActiveId = activeId ? idMap.get(activeId) ?? activeId : null;
+  if (migratedSelectedId !== selectedId || migratedWatchedId !== watchedId || migratedActiveId !== activeId) changed = true;
+
+  const nextState = {
     selectedId:
-      typeof state?.selectedId === "string"
-        ? state.selectedId
-        : typeof state?.selectedWorkspaceId === "string"
-          ? state.selectedWorkspaceId
-          : typeof state?.activeId === "string"
-            ? state.activeId
-            : "",
-    watchedId:
-      typeof state?.watchedId === "string"
-        ? state.watchedId
-        : typeof state?.watchedWorkspaceId === "string"
-          ? state.watchedWorkspaceId
-          : null,
-    activeId: typeof state?.activeId === "string" ? state.activeId : null,
-    workspaces: Array.isArray(state?.workspaces) ? state.workspaces : [],
+      migratedSelectedId,
+    watchedId: migratedWatchedId,
+    activeId: migratedActiveId,
+    workspaces: migratedWorkspaces,
   };
+
+  if (changed) {
+    return writeWorkspaceState(nextState);
+  }
+  return nextState;
 }
 
 async function writeWorkspaceState(nextState) {
@@ -688,8 +823,7 @@ async function writeWorkspaceState(nextState) {
     watchedWorkspaceId: watchedId,
     activeId: selectedId || null,
   };
-  await mkdir(path.dirname(outputPath), { recursive: true });
-  await writeFile(outputPath, `${JSON.stringify(output, null, 2)}\n`, "utf8");
+  await writeJsonFileAtomic(outputPath, output);
   return output;
 }
 
@@ -1164,12 +1298,17 @@ async function handleDesktopInvoke(event, command, ...args) {
       }
       const remoteType = input.remoteType === "opencode" ? "opencode" : "openwork";
       const directory = typeof input.directory === "string" && input.directory.trim() ? input.directory.trim() : null;
-      const openworkHostUrl = typeof input.openworkHostUrl === "string" && input.openworkHostUrl.trim()
+      const rawOpenworkHostUrl = typeof input.openworkHostUrl === "string" && input.openworkHostUrl.trim()
         ? input.openworkHostUrl.trim()
         : null;
+      const openworkHostUrl = remoteType === "openwork"
+        ? stripOpenworkWorkspaceMount(rawOpenworkHostUrl ?? baseUrl)
+        : rawOpenworkHostUrl;
       const openworkWorkspaceId = typeof input.openworkWorkspaceId === "string" && input.openworkWorkspaceId.trim()
         ? input.openworkWorkspaceId.trim()
-        : null;
+        : remoteType === "openwork"
+          ? parseOpenworkWorkspaceIdFromUrl(rawOpenworkHostUrl) || parseOpenworkWorkspaceIdFromUrl(baseUrl)
+          : null;
       const id = remoteType === "openwork"
         ? openworkRemoteWorkspaceId(openworkHostUrl ?? baseUrl, openworkWorkspaceId)
         : remoteWorkspaceId(baseUrl, directory);
@@ -1205,9 +1344,10 @@ async function handleDesktopInvoke(event, command, ...args) {
       const input = args[0] ?? {};
       const workspaceId = String(input.workspaceId ?? "").trim();
       if (!workspaceId) throw new Error("workspaceId is required");
+      const { workspaceId: _workspaceId, ...patch } = input;
       return mutateWorkspaceState((state) => {
         state.workspaces = state.workspaces.map((entry) =>
-          entry.id === workspaceId ? { ...entry, ...input } : entry,
+          entry.id === workspaceId ? { ...entry, ...patch } : entry,
         );
         return state;
       });
@@ -1785,7 +1925,7 @@ ipcMain.handle("openwork:shell:relaunch", async () => {
 });
 
 // ── Embedded browser IPC ────────────────────────────────────────────────
-ipcMain.handle("openwork:browser:show", (_event, bounds) => showBrowserView(bounds));
+ipcMain.handle("openwork:browser:show", (_event, bounds) => attachBrowserView(bounds));
 ipcMain.handle("openwork:browser:hide", () => hideBrowserView());
 ipcMain.handle("openwork:browser:navigate", (_event, url) => {
   if (!browserView) return;

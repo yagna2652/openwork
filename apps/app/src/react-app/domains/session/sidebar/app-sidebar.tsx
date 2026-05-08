@@ -1,7 +1,7 @@
 /** @jsxImportSource react */
 import * as React from "react";
 import {
-  ChevronDown,
+  AlertCircle,
   ChevronRight,
   Loader2,
   MoreHorizontal,
@@ -10,18 +10,22 @@ import {
   Share2,
   Trash2,
   RefreshCw,
+  RotateCcw,
   Settings,
   FolderOpen,
 } from "lucide-react";
 
 import { getDisplaySessionTitle } from "../../../../app/lib/session-title";
 import type { WorkspaceInfo } from "../../../../app/lib/desktop";
+import { OpenWorkDenHelpLink } from "../../workspace/openwork-den-help-link";
 import type {
   WorkspaceConnectionState,
   WorkspaceSessionGroup,
 } from "../../../../app/types";
 import {
+  isRemoteConnectionErrorMessage,
   getWorkspaceTaskLoadErrorDisplay,
+  isRemoteConnectionWorkspace,
   isWindowsPlatform,
 } from "../../../../app/utils";
 import { t } from "../../../../i18n";
@@ -100,13 +104,13 @@ function SessionActions({ className, sessionId }: SessionActionsProps) {
       <DropdownMenuContent align="end" side="bottom" sideOffset={4} alignOffset={-4} className="w-56">
         {ctx.onOpenRenameSession ? (
           <DropdownMenuItem onClick={() => ctx.onOpenRenameSession?.(sessionId)}>
-            <Pencil size={14} />
+            <Pencil className="size-4" />
             {t("workspace_list.rename_session")}
           </DropdownMenuItem>
         ) : null}
         {ctx.onOpenDeleteSession ? (
           <DropdownMenuItem variant="destructive" onClick={() => ctx.onOpenDeleteSession?.(sessionId)}>
-            <Trash2 size={14} />
+            <Trash2 className="size-4" />
             {t("workspace_list.delete_session")}
           </DropdownMenuItem>
         ) : null}
@@ -134,13 +138,13 @@ function SessionContextMenu({ children, sessionId }: SessionContextMenuProps) {
       <ContextMenuContent className="w-56">
         {ctx.onOpenRenameSession ? (
           <ContextMenuItem onClick={() => ctx.onOpenRenameSession?.(sessionId)}>
-            <Pencil size={14} />
+            <Pencil className="size-4" />
             {t("workspace_list.rename_session")}
           </ContextMenuItem>
         ) : null}
         {ctx.onOpenDeleteSession ? (
           <ContextMenuItem variant="destructive" onClick={() => ctx.onOpenDeleteSession?.(sessionId)}>
-            <Trash2 size={14} />
+            <Trash2 className="size-4" />
             {t("workspace_list.delete_session")}
           </ContextMenuItem>
         ) : null}
@@ -172,22 +176,22 @@ function WorkspaceActionsMenu({ workspace, isConnectionActionBusy, canRecover, c
             }}
             aria-label={t("workspace_list.workspace_options")}
           >
-            <MoreHorizontal size={14} />
+            <MoreHorizontal className="size-4" />
           </Button>
         }
       />
       <DropdownMenuContent align="end" side="bottom" sideOffset={4} className="w-56">
         <DropdownMenuItem onClick={() => ctx.onOpenRenameWorkspace(workspace.id)}>
-          <Pencil size={14} />
+          <Pencil className="size-4" />
           {t("workspace_list.edit_name")}
         </DropdownMenuItem>
         <DropdownMenuItem onClick={() => ctx.onShareWorkspace(workspace.id)}>
-          <Share2 size={14} />
+          <Share2 className="size-4" />
           {t("workspace_list.share")}
         </DropdownMenuItem>
         {workspace.workspaceType === "local" ? (
           <DropdownMenuItem onClick={() => ctx.onRevealWorkspace(workspace.id)}>
-            <FolderOpen size={14} />
+            <FolderOpen className="size-4" />
             {isWindowsPlatform() ? t("workspace_list.reveal_explorer") : t("workspace_list.reveal_finder")}
           </DropdownMenuItem>
         ) : null}
@@ -198,7 +202,7 @@ function WorkspaceActionsMenu({ workspace, isConnectionActionBusy, canRecover, c
                 onClick={() => void Promise.resolve(ctx.onRecoverWorkspace(workspace.id))}
                 disabled={isConnectionActionBusy}
               >
-                <RefreshCw size={14} />
+                <RefreshCw className="size-4" />
                 {t("workspace_list.recover")}
               </DropdownMenuItem>
             ) : null}
@@ -206,14 +210,14 @@ function WorkspaceActionsMenu({ workspace, isConnectionActionBusy, canRecover, c
               onClick={() => void Promise.resolve(ctx.onTestWorkspaceConnection(workspace.id))}
               disabled={isConnectionActionBusy}
             >
-              <RefreshCw size={14} />
+              <RefreshCw className="size-4" />
               {t("workspace_list.test_connection")}
             </DropdownMenuItem>
             <DropdownMenuItem
               onClick={() => ctx.onEditWorkspaceConnection(workspace.id)}
               disabled={isConnectionActionBusy}
             >
-              <Settings size={14} />
+              <Settings className="size-4" />
               {t("workspace_list.edit_connection")}
             </DropdownMenuItem>
           </>
@@ -223,11 +227,96 @@ function WorkspaceActionsMenu({ workspace, isConnectionActionBusy, canRecover, c
           variant="destructive"
           onClick={() => ctx.onForgetWorkspace(workspace.id)}
         >
-          <Trash2 size={14} />
+          <Trash2 className="size-4" />
           {t("workspace_list.remove_workspace")}
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
+  );
+}
+
+function RemoteConnectionIssueCard(props: {
+  message: string;
+  tone: "error" | "offline";
+  canRecover: boolean;
+  busy: boolean;
+  onRecover: () => void;
+  onTest: () => void;
+  onEdit: () => void;
+}) {
+  const isOffline = props.tone === "offline";
+  const shellClass = isOffline
+    ? "border-amber-7/35 bg-amber-2/45"
+    : "border-red-7/35 bg-red-1/40";
+  const iconClass = isOffline
+    ? "bg-amber-3/60 text-amber-11"
+    : "bg-red-3/60 text-red-11";
+  const detailClass = isOffline
+    ? "border-amber-7/25 bg-amber-1/40 text-amber-11"
+    : "border-red-7/25 bg-red-1/40 text-red-11";
+
+  return (
+    <SidebarMenuSubItem>
+      <div className={`w-full rounded-[15px] border px-3 py-3 text-left ${shellClass}`}>
+        <div className="flex items-start gap-2.5">
+          <div className={`mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full ${iconClass}`}>
+            <AlertCircle size={14} />
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="text-[12px] font-medium text-dls-text">
+              {t("workspace_list.remote_worker_unavailable")}
+            </div>
+            <div className="mt-1 text-[11px] leading-5 text-gray-10">
+              {t("workspace_list.remote_worker_unavailable_hint")}
+            </div>
+            <div
+              className={`mt-2 rounded-lg border px-2 py-1.5 text-[11px] leading-4 ${detailClass}`}
+              title={props.message}
+            >
+              {props.message}
+            </div>
+            <OpenWorkDenHelpLink />
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {props.canRecover ? (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-7 gap-1.5 rounded-lg px-2 text-[11px]"
+                  onClick={props.onRecover}
+                  disabled={props.busy}
+                >
+                  <RotateCcw size={12} />
+                  {t("workspace_list.recover")}
+                </Button>
+              ) : null}
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="h-7 gap-1.5 rounded-lg px-2 text-[11px]"
+                onClick={props.onTest}
+                disabled={props.busy}
+              >
+                <RefreshCw size={12} />
+                {t("workspace_list.test_connection")}
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="h-7 gap-1.5 rounded-lg px-2 text-[11px]"
+                onClick={props.onEdit}
+                disabled={props.busy}
+              >
+                <Settings size={12} />
+                {t("common.edit")}
+              </Button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </SidebarMenuSubItem>
   );
 }
 
@@ -416,7 +505,7 @@ export function AppSidebar(props: AppSidebarProps) {
           <SidebarMenu>
             <SidebarMenuItem>
               <SidebarMenuButton onClick={props.onOpenCreateWorkspace}>
-                <Plus size={14} />
+                <Plus className="size-4" />
                 {t("workspace_list.add_workspace")}
               </SidebarMenuButton>
             </SidebarMenuItem>
@@ -459,18 +548,23 @@ function WorkspaceHeader({
   return (
     <SidebarMenuButton
       {...props}
-      className="h-8 group-hover/workspace-header:bg-sidebar-accent group-hover/workspace-header:text-sidebar-accent-foreground mac:group-hover/workspace-header:bg-black/5 dark:mac:group-hover/workspace-header:bg-white/10"
+      className={cn("h-8 group-hover/workspace-header:bg-sidebar-accent group-hover/workspace-header:text-sidebar-accent-foreground mac:group-hover/workspace-header:bg-black/5 dark:mac:group-hover/workspace-header:bg-white/10", statusLabel && "h-10")}
       onClick={(event) => {
         onClick?.(event);
         handleSelectWorkspace();
       }}
     >
       <div
-        className="flex size-5 shrink-0 items-center justify-center rounded-full"
+        className="flex size-4 shrink-0 items-center justify-center rounded-full"
         style={{ backgroundColor: workspaceSwatchColor(workspace.id || workspaceLabel(workspace)) }}
       />
-      <div className="min-w-0 flex-1">
-        <span className="block truncate font-medium">{workspaceLabel(workspace)}</span>
+      <div
+        className={cn(
+          "min-w-0 flex-1 transition-[padding] duration-75 group-hover/menu-item:pr-12 group-focus-within/menu-item:pr-12 group-hover/workspace-header:pr-12 group-focus-within/workspace-header:pr-12",
+          isLoading && "pr-6",
+        )}
+      >
+        <span className="block truncate">{workspaceLabel(workspace)}</span>
         {statusLabel ? (
           <span className={`block text-xs ${isError ? "text-destructive" : "text-muted-foreground"}`}>
             {statusLabel}
@@ -479,9 +573,9 @@ function WorkspaceHeader({
       </div>
       <span className="ml-auto flex items-center gap-1 pl-0">
         {isLoading ? (
-          <Loader2 size={14} className="animate-spin text-muted-foreground" />
+          <Loader2 className="size-4 animate-spin text-muted-foreground transition-opacity group-hover/menu-item:opacity-0 group-hover/workspace-header:opacity-0" />
         ) : null}
-        <ChevronRight size={14} className="text-muted-foreground transition-transform duration-200 group-data-open/collapsible:rotate-90 hover:text-foreground" />
+        <ChevronRight className="size-4 text-muted-foreground transition-transform duration-200 group-data-open/collapsible:rotate-90 hover:text-foreground" />
       </span>
     </SidebarMenuButton>
   );
@@ -521,12 +615,22 @@ function WorkspaceSidebarGroup({
     message: null,
   };
   const isConnectionActionBusy = isConnecting || connectionState.status === "connecting";
-  const canRecover = workspace.workspaceType === "remote" && connectionState.status === "error";
+  const isRemoteWorkspace = isRemoteConnectionWorkspace(workspace);
+  const canRecover = isRemoteWorkspace && connectionState.status === "error";
   const taskLoadError = getWorkspaceTaskLoadErrorDisplay(workspace, group.error);
+  const connectionIssueMessage = connectionState.status === "error"
+    ? connectionState.message?.trim() || taskLoadError.message
+    : group.error?.trim() || taskLoadError.message;
+  const showRemoteConnectionIssue =
+    (isRemoteWorkspace || isRemoteConnectionErrorMessage(connectionIssueMessage)) &&
+    Boolean(connectionIssueMessage) &&
+    (connectionState.status === "error" || group.status === "error");
   const isExpanded = ctx.expandedWorkspaceIds.has(workspace.id);
   const isSelected = ctx.selectedWorkspaceId === workspace.id;
 
   const statusLabel = (() => {
+    if (showRemoteConnectionIssue) return t("workspace_list.unavailable");
+    if (connectionState.status === "error") return connectionState.message?.trim() || taskLoadError.message;
     if (group.status === "error") return taskLoadError.label;
     if (isConnectionActionBusy) return t("workspace_list.connecting");
     if (!ctx.developerMode) return "";
@@ -570,32 +674,48 @@ function WorkspaceSidebarGroup({
                   />
                 }
               />
-              <div className="absolute right-8 top-1 flex items-center gap-1">
-              <Button
-                variant="ghost"
-                size="icon"
-                className="size-6 text-muted-foreground opacity-0 group-focus-within/menu-item:opacity-100 group-hover/menu-item:opacity-100"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  ctx.onCreateTaskInWorkspace(workspace.id);
-                }}
-                disabled={ctx.newTaskDisabled}
-                aria-label={t("session.new_task")}
-              >
-                <Plus size={14} />
-              </Button>
-              <WorkspaceActionsMenu
-                workspace={workspace}
-                isConnectionActionBusy={isConnectionActionBusy}
-                canRecover={canRecover}
-                className="size-6 text-muted-foreground opacity-0 group-focus-within/menu-item:opacity-100 group-hover/menu-item:opacity-100 data-popup-open:opacity-100"
-              />
+              <div className="absolute right-8 top-1/2 flex -translate-y-1/2 items-center gap-1">
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="size-6 text-muted-foreground opacity-0 group-focus-within/menu-item:opacity-100 group-hover/menu-item:opacity-100"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    ctx.onCreateTaskInWorkspace(workspace.id);
+                  }}
+                  disabled={ctx.newTaskDisabled}
+                  aria-label={t("session.new_task")}
+                >
+                  <Plus className="size-4" />
+                </Button>
+                <WorkspaceActionsMenu
+                  workspace={workspace}
+                  isConnectionActionBusy={isConnectionActionBusy}
+                  canRecover={canRecover}
+                  className="size-6 text-muted-foreground opacity-0 group-focus-within/menu-item:opacity-100 group-hover/menu-item:opacity-100 data-popup-open:opacity-100"
+                />
               </div>
             </div>
 
             <CollapsibleContent className="pt-1">
               <SidebarMenuSub>
-                {showInitialLoading ? (
+                {showRemoteConnectionIssue ? (
+                  <RemoteConnectionIssueCard
+                    message={connectionIssueMessage}
+                    tone={taskLoadError.tone}
+                    canRecover={canRecover}
+                    busy={isConnectionActionBusy}
+                    onRecover={() => {
+                      void Promise.resolve(ctx.onRecoverWorkspace(workspace.id));
+                    }}
+                    onTest={() => {
+                      void Promise.resolve(ctx.onTestWorkspaceConnection(workspace.id));
+                    }}
+                    onEdit={() => {
+                      ctx.onEditWorkspaceConnection(workspace.id);
+                    }}
+                  />
+                ) : showInitialLoading ? (
                   <>
                     {[0, 1, 2].map((idx) => (
                       <SidebarMenuSubItem key={`skeleton-${idx}`}>
@@ -605,8 +725,8 @@ function WorkspaceSidebarGroup({
                   </>
                 ) : group.status === "loading" && group.sessions.length === 0 ? (
                   <SidebarMenuSubItem>
-                    <SidebarMenuSubButton aria-disabled className="text-muted-foreground text-xs">
-                      {t("workspace.loading_tasks")}
+                    <SidebarMenuSubButton aria-disabled className="text-muted-foreground text-xs truncate">
+                      <span className="truncate">{t("workspace.loading_tasks")}</span>
                     </SidebarMenuSubButton>
                   </SidebarMenuSubItem>
                 ) : group.sessions.length > 0 ? (
@@ -615,6 +735,7 @@ function WorkspaceSidebarGroup({
                       <SessionMenuItem
                         key={row.session.id}
                         session={row.session}
+                        depth={row.depth}
                         tree={tree}
                         workspaceId={workspace.id}
                         forcedExpandedSessionIds={forcedExpandedSessionIds}
@@ -626,7 +747,7 @@ function WorkspaceSidebarGroup({
                           className="text-muted-foreground text-xs"
                           onClick={() => showMoreSessions(workspace.id, rootSessions.length)}
                         >
-                          {showMoreLabel}
+                          <span className="truncate">{showMoreLabel}</span>
                         </SidebarMenuSubButton>
                       </SidebarMenuSubItem>
                     ) : null}
@@ -635,9 +756,9 @@ function WorkspaceSidebarGroup({
                   <SidebarMenuSubItem>
                     <SidebarMenuSubButton
                       aria-disabled
-                      className={taskLoadError.tone === "offline" ? "text-amber-600" : "text-destructive"}
+                      className={cn("text-xs", taskLoadError.tone === "offline" ? "text-amber-600" : "text-destructive")}
                     >
-                      {taskLoadError.message}
+                      <span className="truncate">{taskLoadError.message}</span>
                     </SidebarMenuSubButton>
                   </SidebarMenuSubItem>
                 ) : (
@@ -647,7 +768,7 @@ function WorkspaceSidebarGroup({
                       onClick={() => ctx.onCreateTaskInWorkspace(workspace.id)}
                       aria-disabled={ctx.newTaskDisabled}
                     >
-                      {t("workspace.no_tasks")}
+                      <span className="truncate">{t("workspace.no_tasks")}</span>
                     </SidebarMenuSubButton>
                   </SidebarMenuSubItem>
                 )}
@@ -662,12 +783,13 @@ function WorkspaceSidebarGroup({
 
 type SessionMenuItemProps = {
   session: SessionListItem;
+  depth: number;
   tree: SessionTreeState;
   workspaceId: string;
   forcedExpandedSessionIds: Set<string>;
 };
 
-function SessionMenuItem({ session, tree, workspaceId, forcedExpandedSessionIds }: SessionMenuItemProps) {
+function SessionMenuItem({ session, tree, workspaceId, forcedExpandedSessionIds, depth }: SessionMenuItemProps) {
   const ctx = useSidebarContext();
   const isSelected = ctx.selectedSessionId === session.id;
   const displayTitle = getDisplaySessionTitle(session.title);
@@ -689,38 +811,39 @@ function SessionMenuItem({ session, tree, workspaceId, forcedExpandedSessionIds 
 
   if (hasChildren) {
     return (
-      <Collapsible open={isExpanded} onOpenChange={() => ctx.toggleSessionExpanded(session.id)}>
+      <Collapsible
+        open={isExpanded}
+        onOpenChange={() => ctx.toggleSessionExpanded(session.id)}
+        className="group/session-collapsible"
+      >
         <SidebarMenuSubItem>
-          <div className="flex min-w-0 items-center gap-1">
+          <SessionContextMenu sessionId={session.id}>
             <CollapsibleTrigger
               render={
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="size-7 shrink-0"
-                  aria-label={isExpanded ? t("sidebar.collapse") : t("sidebar.expand")}
+                <SidebarMenuSubButton
+                  className={cn(depth > 0 && "ps-13")}
+                  isActive={isSelected}
+                  onClick={openSession}
+                  onPointerEnter={prefetchSession}
+                  onFocus={prefetchSession}
                 >
-                  {isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                </Button>
+                  {isSessionActive ? <span className="size-1.5 shrink-0 rounded-full bg-amber-500" /> : null}
+                  <span
+                    className="min-w-0 flex-1 truncate transition-[padding] duration-75 group-hover/menu-sub-item:pe-5 group-focus-within/menu-sub-item:pe-5"
+                    title={displayTitle}
+                  >
+                    {displayTitle}
+                  </span>
+                  <span className="ml-auto flex shrink-0 items-center pl-0">
+                    <ChevronRight className="size-4 text-muted-foreground transition-transform duration-200 group-data-open/session-collapsible:rotate-90 hover:text-foreground" />
+                  </span>
+                </SidebarMenuSubButton>
               }
             />
-            <SessionContextMenu sessionId={session.id}>
-              <SidebarMenuSubButton
-                isActive={isSelected}
-                onClick={openSession}
-                onPointerEnter={prefetchSession}
-                onFocus={prefetchSession}
-              >
-                {isSessionActive ? <span className="size-1.5 shrink-0 rounded-full bg-amber-500" /> : null}
-                <span className="truncate" title={displayTitle}>
-                  {displayTitle}
-                </span>
-              </SidebarMenuSubButton>
-            </SessionContextMenu>
-          </div>
+          </SessionContextMenu>
           <SessionActions
             sessionId={session.id}
-            className="absolute right-3 top-1.5 opacity-0 group-hover/menu-sub-item:opacity-100 data-popup-open:opacity-100"
+            className="absolute right-9 top-1/2 -translate-y-1/2 opacity-0 group-hover/menu-sub-item:opacity-100 data-popup-open:opacity-100"
           />
         </SidebarMenuSubItem>
       </Collapsible>
@@ -730,14 +853,20 @@ function SessionMenuItem({ session, tree, workspaceId, forcedExpandedSessionIds 
   return (
     <SidebarMenuSubItem>
       <SessionContextMenu sessionId={session.id}>
-        <SidebarMenuSubButton isActive={isSelected} onClick={openSession} onPointerEnter={prefetchSession} onFocus={prefetchSession}>
+        <SidebarMenuSubButton
+          isActive={isSelected}
+          onClick={openSession}
+          onPointerEnter={prefetchSession}
+          onFocus={prefetchSession}
+          className={cn("transition-[padding] duration-75 group-hover/menu-sub-item:pe-8 group-focus-within/menu-sub-item:pe-8", depth > 0 && "ps-13")}
+        >
           {isSessionActive ? <span className="size-1.5 shrink-0 rounded-full bg-amber-500" /> : null}
           <span className="truncate" title={displayTitle}>{displayTitle}</span>
         </SidebarMenuSubButton>
       </SessionContextMenu>
       <SessionActions
         sessionId={session.id}
-        className="absolute right-3 top-1.5 opacity-0 group-hover/menu-sub-item:opacity-100 data-popup-open:opacity-100"
+        className="absolute right-3 top-1/2 -translate-y-1/2 opacity-0 group-hover/menu-sub-item:opacity-100 data-popup-open:opacity-100"
       />
     </SidebarMenuSubItem>
   );
