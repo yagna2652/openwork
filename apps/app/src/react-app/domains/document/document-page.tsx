@@ -1,11 +1,12 @@
 /** @jsxImportSource react */
-import { useCallback, useEffect, useState } from "react";
-import { AlertCircle, FileText, Loader2, RefreshCcw, Save, Send } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { AlertCircle, FileText, Loader2, RefreshCcw, Send } from "lucide-react";
 
 import type { OpenworkServerClient, OpenworkWorkspaceFileContent } from "../../../app/lib/openwork-server";
 import { Button } from "../../design-system/button";
 import { buildDocumentSelectionPrompt } from "./document-task-prompt";
-import { DocumentEditor } from "./document-editor";
+import { PrettyDocumentEditor, SourceDocumentEditor } from "./document-editor";
+import { getPrettyModeAvailability } from "./document-safety";
 
 type DocumentPageProps = {
   client: OpenworkServerClient;
@@ -22,16 +23,27 @@ export function DocumentPage(props: DocumentPageProps) {
   const [content, setContent] = useState("");
   const [savedContent, setSavedContent] = useState("");
   const [selectedText, setSelectedText] = useState("");
+  const [mode, setMode] = useState<"source" | "pretty">("source");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [asking, setAsking] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [updatedAt, setUpdatedAt] = useState<number | null>(null);
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const latestContentRef = useRef("");
+  const savedContentRef = useRef("");
+  const updatedAtRef = useRef<number | null>(null);
+  const savingRef = useRef(false);
 
   const dirty = content !== savedContent;
   const fileName = props.path.split("/").filter(Boolean).at(-1) || props.path;
+  const prettyMode = useMemo(() => getPrettyModeAvailability(content), [content]);
 
   const load = useCallback(async () => {
+    if (saveTimerRef.current) {
+      clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = null;
+    }
     setLoading(true);
     setError(null);
     try {
@@ -41,8 +53,11 @@ export function DocumentPage(props: DocumentPageProps) {
       )) as OpenworkWorkspaceFileContent;
       setContent(result.content);
       setSavedContent(result.content);
+      latestContentRef.current = result.content;
+      savedContentRef.current = result.content;
       setSelectedText("");
       setUpdatedAt(result.updatedAt ?? null);
+      updatedAtRef.current = result.updatedAt ?? null;
     } catch (err) {
       setError(describeError(err));
     } finally {
@@ -52,27 +67,73 @@ export function DocumentPage(props: DocumentPageProps) {
 
   const saveContent = useCallback(
     async (nextContent: string) => {
+      if (savingRef.current) return;
+      if (nextContent === savedContentRef.current) return;
+      savingRef.current = true;
       setSaving(true);
       setError(null);
       try {
         const result = await props.client.writeWorkspaceFile(props.workspaceId, {
           path: props.path,
           content: nextContent,
-          baseUpdatedAt: updatedAt,
+          baseUpdatedAt: updatedAtRef.current,
         });
         setContent(nextContent);
         setSavedContent(nextContent);
+        latestContentRef.current = nextContent;
+        savedContentRef.current = nextContent;
         setUpdatedAt(result.updatedAt ?? null);
+        updatedAtRef.current = result.updatedAt ?? null;
       } catch (err) {
         setError(describeError(err));
       } finally {
+        savingRef.current = false;
         setSaving(false);
+        if (latestContentRef.current !== nextContent) {
+          if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+          saveTimerRef.current = setTimeout(() => {
+            saveTimerRef.current = null;
+            void saveContent(latestContentRef.current);
+          }, 900);
+        }
       }
     },
-    [props.client, props.path, props.workspaceId, updatedAt],
+    [props.client, props.path, props.workspaceId],
+  );
+
+  const flushAutosave = useCallback(() => {
+    if (saveTimerRef.current) {
+      clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = null;
+    }
+    void saveContent(latestContentRef.current);
+  }, [saveContent]);
+
+  const scheduleAutosave = useCallback(
+    (nextContent: string) => {
+      setContent(nextContent);
+      latestContentRef.current = nextContent;
+      if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = setTimeout(() => {
+        saveTimerRef.current = null;
+        void saveContent(latestContentRef.current);
+      }, 1000);
+    },
+    [saveContent],
+  );
+
+  const switchMode = useCallback(
+    (nextMode: "source" | "pretty") => {
+      if (nextMode === "pretty" && !prettyMode.available) return;
+      flushAutosave();
+      setMode(nextMode);
+      setSelectedText("");
+    },
+    [flushAutosave, prettyMode.available],
   );
 
   const askOpenWork = useCallback(async () => {
+    flushAutosave();
     setAsking(true);
     setError(null);
     try {
@@ -87,11 +148,30 @@ export function DocumentPage(props: DocumentPageProps) {
     } finally {
       setAsking(false);
     }
-  }, [props, selectedText]);
+  }, [flushAutosave, props, selectedText]);
 
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    if (mode === "pretty" && !prettyMode.available) {
+      flushAutosave();
+      setMode("source");
+    }
+  }, [flushAutosave, mode, prettyMode.available]);
+
+  useEffect(() => {
+    return () => {
+      if (saveTimerRef.current) {
+        clearTimeout(saveTimerRef.current);
+        saveTimerRef.current = null;
+      }
+      if (latestContentRef.current !== savedContentRef.current) {
+        void saveContent(latestContentRef.current);
+      }
+    };
+  }, [saveContent]);
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-dls-surface">
@@ -105,8 +185,27 @@ export function DocumentPage(props: DocumentPageProps) {
         </div>
         <div className="flex items-center gap-2">
           <span className="hidden text-[12px] text-dls-secondary md:inline">
-            {saving ? "Saving..." : dirty ? "Unsaved" : updatedAt ? "Saved" : ""}
+            {saving ? "Saving..." : dirty ? "Autosave pending" : updatedAt ? "Saved" : ""}
           </span>
+          <div className="flex rounded-md border border-dls-border bg-dls-surface p-0.5">
+            <button
+              type="button"
+              className={`h-7 rounded px-2 text-[12px] transition-colors ${mode === "source" ? "bg-dls-hover text-dls-text" : "text-dls-secondary hover:text-dls-text"}`}
+              onClick={() => switchMode("source")}
+              disabled={loading || saving || asking}
+            >
+              Source
+            </button>
+            <button
+              type="button"
+              className={`h-7 rounded px-2 text-[12px] transition-colors ${mode === "pretty" ? "bg-dls-hover text-dls-text" : "text-dls-secondary hover:text-dls-text disabled:cursor-not-allowed disabled:opacity-50"}`}
+              onClick={() => switchMode("pretty")}
+              disabled={loading || saving || asking || !prettyMode.available}
+              title={prettyMode.available ? "Edit formatted Markdown" : prettyMode.reason}
+            >
+              Pretty
+            </button>
+          </div>
           <button
             type="button"
             className="inline-flex h-8 w-8 items-center justify-center rounded-md text-dls-secondary transition-colors hover:bg-dls-hover hover:text-dls-text disabled:cursor-not-allowed disabled:opacity-60"
@@ -117,14 +216,6 @@ export function DocumentPage(props: DocumentPageProps) {
           >
             <RefreshCcw size={15} />
           </button>
-          <Button
-            className="h-8 px-3 py-1.5 text-[13px]"
-            onClick={() => void saveContent(content)}
-            disabled={loading || saving || asking || !dirty}
-          >
-            {saving ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />}
-            Save
-          </Button>
           <Button
             className="h-8 px-3 py-1.5 text-[13px]"
             onClick={() => void askOpenWork()}
@@ -146,6 +237,12 @@ export function DocumentPage(props: DocumentPageProps) {
         </div>
       ) : null}
 
+      {!prettyMode.available ? (
+        <div className="border-b border-dls-border bg-dls-hover/20 px-4 py-2 text-[12px] text-dls-secondary">
+          {prettyMode.reason}
+        </div>
+      ) : null}
+
       {selectedText.trim() ? (
         <div className="border-b border-dls-border bg-dls-hover/30 px-4 py-2 text-[12px] text-dls-secondary">
           Selection ready for OpenWork: {selectedText.length.toLocaleString()} characters
@@ -159,12 +256,23 @@ export function DocumentPage(props: DocumentPageProps) {
             Loading document
           </div>
         ) : (
-          <DocumentEditor
-            value={content}
-            onChange={setContent}
-            onSelectionChange={setSelectedText}
-            readOnly={saving || asking}
-          />
+          mode === "pretty" && prettyMode.available ? (
+            <PrettyDocumentEditor
+              value={content}
+              onChange={scheduleAutosave}
+              onSelectionChange={setSelectedText}
+              onBlur={flushAutosave}
+              readOnly={asking}
+            />
+          ) : (
+            <SourceDocumentEditor
+              value={content}
+              onChange={scheduleAutosave}
+              onSelectionChange={setSelectedText}
+              onBlur={flushAutosave}
+              readOnly={asking}
+            />
+          )
         )}
       </div>
     </div>

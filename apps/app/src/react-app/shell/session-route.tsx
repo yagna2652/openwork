@@ -203,6 +203,8 @@ function focusPromptSoon() {
 
 const emptyPendingPermissions: PendingPermission[] = [];
 
+const IGNORED_DOCUMENT_DIRS = new Set([".git", ".opencode", "node_modules", "dist", "build"]);
+
 function useQueryCacheState<T>(queryKey: readonly unknown[] | null, fallback: T): T {
   const queryClient = getReactQueryClient();
   return useSyncExternalStore(
@@ -403,6 +405,8 @@ export function SessionRoute() {
   const [workspaces, setWorkspaces] = useState<RouteWorkspace[]>([]);
   const [sessionsByWorkspaceId, setSessionsByWorkspaceId] = useState<Record<string, any[]>>({});
   const [errorsByWorkspaceId, setErrorsByWorkspaceId] = useState<Record<string, string | null>>({});
+  const [documentsByWorkspaceId, setDocumentsByWorkspaceId] = useState<Record<string, string[]>>({});
+  const [documentsLoadingByWorkspaceId, setDocumentsLoadingByWorkspaceId] = useState<Record<string, boolean>>({});
   const [workspaceConnectionOverrides, setWorkspaceConnectionOverrides] = useState<Record<string, WorkspaceConnectionState>>({});
   const [routeError, setRouteError] = useState<string | null>(null);
   const [legacySelectedWorkspaceId, setLegacySelectedWorkspaceId] = useState<string>(() => readActiveWorkspaceId() ?? "");
@@ -1052,6 +1056,7 @@ export function SessionRoute() {
       navigateToWorkspaceSession(selectedWorkspaceId, selectedSessionId, { replace: true });
       return;
     }
+    if (documentPath) return;
     if (selectedSessionId) return;
     if (!selectedWorkspaceId) return;
     const remembered = readLastSessionFor(selectedWorkspaceId);
@@ -1061,6 +1066,7 @@ export function SessionRoute() {
     navigateToWorkspaceSession(selectedWorkspaceId, remembered, { replace: true });
   }, [
     loading,
+    documentPath,
     legacySelectedWorkspaceId,
     navigateToWorkspaceSession,
     routeWorkspaceId,
@@ -1151,6 +1157,91 @@ export function SessionRoute() {
   );
   const selectedWorkspaceServerToken = selectedWorkspaceEndpoint?.token ?? "";
   const opencodeBaseUrl = selectedWorkspaceEndpoint?.opencodeBaseUrl ?? "";
+
+  const normalizeDocumentPathForWorkspace = useCallback((path: string) => {
+    const normalizedPath = path.trim().replace(/\\/g, "/");
+    const normalizedRoot = selectedWorkspaceRoot.replace(/\\/g, "/").replace(/\/+$/, "");
+    if (normalizedRoot && normalizedPath.startsWith(`${normalizedRoot}/`)) {
+      return normalizedPath.slice(normalizedRoot.length + 1);
+    }
+    const rootParts = normalizedRoot.split("/").filter(Boolean);
+    const pathParts = normalizedPath.split("/").filter(Boolean);
+    for (let index = 0; index < pathParts.length; index += 1) {
+      const candidatePrefix = pathParts.slice(0, index + 1);
+      if (
+        candidatePrefix.length <= rootParts.length &&
+        candidatePrefix.every((part, offset) => part === rootParts[rootParts.length - candidatePrefix.length + offset])
+      ) {
+        const rest = pathParts.slice(index + 1).join("/");
+        if (rest) return rest;
+      }
+    }
+    return normalizedPath.replace(/^\/+/, "");
+  }, [selectedWorkspaceRoot]);
+
+  const listMarkdownDocuments = useCallback(
+    async (workspaceId: string) => {
+      const workspace = workspaceId.trim();
+      if (!client || !workspace) return [];
+
+      const session = await client.createWorkspaceFileSession(workspace, {
+        ttlSeconds: 60,
+        write: false,
+      }).catch(() => null);
+      if (!session) return [];
+      try {
+        const items: string[] = [];
+        let after: string | null = null;
+        do {
+          const snapshot = await client.listWorkspaceFileCatalog(workspace, session.id, {
+            after,
+            includeDirs: false,
+            limit: 5000,
+          });
+          for (const entry of snapshot.items) {
+            if (entry.kind !== "file") continue;
+            const relativePath = entry.path.replace(/\\/g, "/");
+            const parts = relativePath.split("/");
+            if (parts.some((part) => IGNORED_DOCUMENT_DIRS.has(part))) {
+              continue;
+            }
+            if (/\.(md|mdx|markdown)$/i.test(relativePath)) {
+              items.push(relativePath);
+            }
+          }
+          after = snapshot.nextAfter ?? null;
+        } while (after && items.length < 500);
+        return Array.from(new Set(items)).sort((left, right) => left.localeCompare(right));
+      } finally {
+        void client.closeWorkspaceFileSession(workspace, session.id).catch(() => {});
+      }
+    },
+    [client],
+  );
+
+  useEffect(() => {
+    const workspaceId = selectedWorkspaceId.trim();
+    if (!workspaceId || !client) return;
+    let cancelled = false;
+    setDocumentsLoadingByWorkspaceId((current) => ({ ...current, [workspaceId]: true }));
+    void listMarkdownDocuments(workspaceId).then(
+      (paths) => {
+        if (cancelled) return;
+        setDocumentsByWorkspaceId((current) => ({ ...current, [workspaceId]: paths }));
+      },
+      () => {
+        if (cancelled) return;
+        setDocumentsByWorkspaceId((current) => ({ ...current, [workspaceId]: [] }));
+      },
+    ).finally(() => {
+      if (cancelled) return;
+      setDocumentsLoadingByWorkspaceId((current) => ({ ...current, [workspaceId]: false }));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [client, listMarkdownDocuments, selectedWorkspaceId]);
+
   const selectedWorkspaceIsLoading = retryingWorkspaceIds.includes(selectedWorkspaceId);
   const selectedWorkspaceError = errorsByWorkspaceId[selectedWorkspaceId] ?? null;
   const selectedSessionKnown = Boolean(
@@ -2139,10 +2230,13 @@ export function SessionRoute() {
         workspaceSessionGroups,
         selectedWorkspaceId,
         selectedSessionId,
+        selectedDocumentPath: documentPath,
         developerMode: false,
         sessionStatusById: {},
         connectingWorkspaceId: null,
         workspaceConnectionStateById,
+        documentsByWorkspaceId,
+        documentsLoadingByWorkspaceId,
         newTaskDisabled: !canCreateTask,
         sidebarHydratedFromCache: Object.values(sessionsByWorkspaceId).some((list) => list.length > 0),
         startupPhase: effectiveLoading ? "nativeInit" : "ready",
@@ -2194,6 +2288,11 @@ export function SessionRoute() {
           writeActiveWorkspaceId(workspaceId || null);
           writeLastSessionFor(workspaceId, sessionId);
           navigateToWorkspaceSession(workspaceId, sessionId);
+        },
+        onOpenDocument: (workspaceId, path) => {
+          setLegacySelectedWorkspaceId(workspaceId);
+          writeActiveWorkspaceId(workspaceId || null);
+          navigate(workspaceDocumentRoute(workspaceId, normalizeDocumentPathForWorkspace(path)));
         },
         onPrefetchSession: () => {},
         onCreateTaskInWorkspace: (workspaceId) => {
@@ -2346,20 +2445,19 @@ export function SessionRoute() {
         }
       }}
       onOpenSession={(workspaceId, sessionId) => navigateToWorkspaceSession(workspaceId, sessionId)}
-      onSearchDocuments={selectedWorkspaceId && selectedWorkspaceRoot && opencodeClient ? async (query) => {
+      onSearchDocuments={selectedWorkspaceId && client ? async (query) => {
         const trimmed = query.trim();
-        const result = unwrap(
-          await opencodeClient.find.files({
-            query: trimmed || ".md",
-            dirs: "false",
-            limit: 80,
-            directory: selectedWorkspaceRoot,
-          }),
-        );
-        return result.filter((path) => /\.(md|mdx|markdown)$/i.test(path));
+        const cached = documentsByWorkspaceId[selectedWorkspaceId];
+        const paths = cached ?? await listMarkdownDocuments(selectedWorkspaceId);
+        if (!cached) {
+          setDocumentsByWorkspaceId((current) => ({ ...current, [selectedWorkspaceId]: paths }));
+        }
+        if (!trimmed) return paths.slice(0, 80);
+        const queryValue = trimmed.toLowerCase();
+        return paths.filter((path) => path.toLowerCase().includes(queryValue)).slice(0, 80);
       } : undefined}
       onOpenDocument={selectedWorkspaceId ? (path) => {
-        navigate(workspaceDocumentRoute(selectedWorkspaceId, path));
+        navigate(workspaceDocumentRoute(selectedWorkspaceId, normalizeDocumentPathForWorkspace(path)));
       } : undefined}
       onOpenSettings={(route) => handleOpenSettings(route ?? "/settings/general")}
       sessions={paletteSessionOptions}
